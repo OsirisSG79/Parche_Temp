@@ -1,0 +1,3341 @@
+diff --git a/VERSION.txt b/VERSION.txt
+index 873bea4..26268b5 100644
+--- a/VERSION.txt
++++ b/VERSION.txt
+@@ -1 +1 @@
+-15.8.1
++15.9.0
+diff --git a/aprendizaje_video_airbag.py b/aprendizaje_video_airbag.py
+index d6fa141..e3d9083 100644
+--- a/aprendizaje_video_airbag.py
++++ b/aprendizaje_video_airbag.py
+@@ -419,7 +419,28 @@ def seleccionar_zona_aprendida(ruta_video: str | Path, primer_frame: np.ndarray,
+     if not resultados:
+         return {"activa": False, "tipo_camara": tipo_nombre, "fuente": "sin_referencias_validas",
+                 "bbox_norm": None, "confianza": 0.0, "total_aprendizajes": len(perfiles)}
+-    resultados.sort(key=lambda x: (x[0], str(x[1].get("actualizado_en") or "")), reverse=True)
++    # V15.9: ranking compuesto auditable. Además de la similitud visual se
++    # ponderan el tipo de cámara, los puntos coincidentes, la consistencia
++    # geométrica (inliers) y el soporte de ejemplos previos del perfil.
++    def _score_ranking(score_i: float, perfil_i: dict, comp_i: dict) -> float:
++        tipo_ok = 1.0 if (tipo_nombre and str(perfil_i.get("tipo_camara")) == tipo_nombre) else 0.55
++        puntos = min(1.0, (int(comp_i.get("buenos") or 0) / 40.0))
++        geometria = float(comp_i.get("inlier_ratio") or 0.0)
++        ejemplos = min(1.0, (int(perfil_i.get("ejemplos") or 0) or
++                             int(perfil_i.get("total_aprendizajes") or 0)) / 5.0)
++        calidad = min(1.0, max(0.0, float(perfil_i.get("calidad") or 0.5)))
++        return round(0.45 * score_i + 0.15 * tipo_ok + 0.15 * puntos +
++                     0.15 * geometria + 0.05 * ejemplos + 0.05 * calidad, 4)
++
++    resultados.sort(key=lambda x: (_score_ranking(x[0], x[1], x[2]),
++                                   str(x[1].get("actualizado_en") or "")), reverse=True)
++    ranking = [{"perfil_id": p.get("id"), "tipo_camara": p.get("tipo_camara"),
++                "similitud_visual": round(s, 4),
++                "score_ranking": _score_ranking(s, p, c),
++                "matches_orb": int(c.get("buenos") or 0),
++                "inlier_ratio": round(float(c.get("inlier_ratio") or 0.0), 4),
++                "referencia_nombre": p.get("nombre_origen")}
++               for s, p, c in resultados[:3]]
+ 
+     # 2) Mismo archivo copiado o movido (la firma cambia con la ruta): mismo
+     # nombre y escena prácticamente idéntica también cuenta como ROI propia.
+@@ -443,6 +464,7 @@ def seleccionar_zona_aprendida(ruta_video: str | Path, primer_frame: np.ndarray,
+             "bbox_norm": None, "confianza": round(score, 4),
+             "perfil_candidato": perfil.get("id"), "tipo_candidato": perfil.get("tipo_camara"),
+             "total_aprendizajes": len(perfiles),
++            "ranking_candidatos": ranking,
+         }
+     original = list(perfil["bbox_norm"])
+     sugerida, transformada = _transformar_bbox(original, comp)
+@@ -451,6 +473,17 @@ def seleccionar_zona_aprendida(ruta_video: str | Path, primer_frame: np.ndarray,
+     bbox = sugerida if (autoalinear and sugerida) else original
+     fuente = "nombre_archivo" if exacto_nombre else "similitud_visual"
+     confianza = max(score, 0.78 if exacto_nombre else 0.0)
++    # Comparación región anterior vs candidata para el flujo «Aceptar sugerencia
++    # / Ajustar / Bloquear / Revertir» sin sorpresas al hacer zoom.
++    comparacion_regiones = None
++    if sugerida:
++        comparacion_regiones = {
++            "desplazamiento_norm": [round(sugerida[0] - original[0], 4),
++                                    round(sugerida[1] - original[1], 4)],
++            "escala_aprox": round(
++                ((sugerida[2] - sugerida[0]) * (sugerida[3] - sugerida[1])) /
++                max(1e-9, (original[2] - original[0]) * (original[3] - original[1])), 4),
++        }
+     return {
+         "activa": True,
+         "bloqueada": not (autoalinear and sugerida),
+@@ -463,11 +496,15 @@ def seleccionar_zona_aprendida(ruta_video: str | Path, primer_frame: np.ndarray,
+         "fuente": fuente,
+         "confianza": round(float(min(1.0, confianza)), 4),
+         "similitud_visual": round(score, 4),
++        "score_ranking": _score_ranking(score, perfil, comp),
++        "ranking_candidatos": ranking,
++        "comparacion_regiones": comparacion_regiones,
+         "perfil_id": perfil.get("id"),
+         "referencia_nombre": perfil.get("nombre_origen"),
+         "transformada_por_similitud": bool(autoalinear and sugerida),
+         "autoalineacion_activa": autoalinear,
+         "matches_orb": int(comp.get("buenos") or 0),
++        "inlier_ratio": round(float(comp.get("inlier_ratio") or 0.0), 4),
+         "total_aprendizajes": len(perfiles),
+     }
+ 
+diff --git a/criterios_usuario.py b/criterios_usuario.py
+index f8a943e..41fefeb 100644
+--- a/criterios_usuario.py
++++ b/criterios_usuario.py
+@@ -1,4 +1,11 @@
+-"""Umbrales elegidos explícitamente por el usuario, sin modificar el YAML base."""
++"""Umbrales elegidos explícitamente por el usuario, sin modificar el YAML base.
++
++V15.9: además de la preferencia persistida (con historial), se guarda una
++instantánea por ejecución que explica con qué rangos se coloreó cada lote:
++origen ``predeterminado`` (6/7 ms), ``vigente`` (preferencia guardada) o
++``elegido`` (confirmados en el diálogo previo a «Procesar carpeta»).
++La instantánea nunca reescribe la preferencia global del usuario.
++"""
+ from __future__ import annotations
+ 
+ from datetime import datetime
+@@ -7,20 +14,25 @@ import math
+ from pathlib import Path
+ import threading
+ 
++from utilidades.matriz_apertura import (
++    AMARILLO_PREDETERMINADO_MS,
++    VERDE_PREDETERMINADO_MS,
++    criterio_desde_limites,
++    limites_predefinidos,
++    validar_limites,
++)
+ from utilidades.persistencia import escribir_json_seguro
+ 
+ RUTA_CRITERIOS = Path(__file__).resolve().parent / ".aprendizaje" / "criterios_usuario.json"
++RUTA_INSTANTANEAS = Path(__file__).resolve().parent / ".aprendizaje" / "criterios_ejecuciones"
+ _lock = threading.RLock()
+ 
++ORIGENES_INSTANTANEA = {"predeterminado", "vigente", "elegido"}
++
+ 
+ def _validar(verde_max, amarillo_max):
+-    if (isinstance(verde_max, bool) or isinstance(amarillo_max, bool)
+-            or not isinstance(verde_max, (int, float))
+-            or not isinstance(amarillo_max, (int, float))
+-            or not math.isfinite(verde_max) or not math.isfinite(amarillo_max)
+-            or not 0 <= verde_max < amarillo_max):
+-        raise ValueError("Los límites deben ser finitos: 0 ≤ verde < amarillo; rojo queda por encima.")
+-    return float(verde_max), float(amarillo_max)
++    # Comparte la validación central (finitos, no negativos, 0 ≤ verde < amarillo).
++    return validar_limites(verde_max, amarillo_max)
+ 
+ 
+ def cargar_criterios_usuario() -> dict | None:
+@@ -37,12 +49,30 @@ def cargar_criterios_usuario() -> dict | None:
+         return actual
+ 
+ 
++def criterios_o_predeterminados() -> dict:
++    """Límites vigentes con su origen, sin fallar si no hay preferencia guardada.
++
++    Origen: ``vigente`` si hay criterios del usuario válidos; si no,
++    ``predeterminado`` con 6.0 / 7.0 ms (los del proyecto).
++    """
++    try:
++        actual = cargar_criterios_usuario()
++    except (OSError, ValueError, TypeError):
++        actual = None
++    if actual:
++        verde, amarillo = _validar(actual.get("verde_max"), actual.get("amarillo_max"))
++        return {"verde_max": verde, "amarillo_max": amarillo,
++                "origen": "vigente", "usuario": actual.get("usuario"),
++                "confirmado_en": actual.get("confirmado_en")}
++    verde, amarillo = limites_predefinidos()
++    return {"verde_max": verde, "amarillo_max": amarillo, "origen": "predeterminado"}
++
++
+ def reglas_apertura(actual: dict) -> dict:
+     verde, amarillo = _validar(actual.get("verde_max"), actual.get("amarillo_max"))
+     # Verde se evalúa primero; el límite inferior compartido del intervalo
+     # amarillo no crea un solapamiento observable ni huecos entre decimales.
+-    return {"verde": f"<= {verde:g}", "amarillo": f"{verde:g}-{amarillo:g}",
+-            "rojo": f"> {amarillo:g}"}
++    return criterio_desde_limites(verde, amarillo)
+ 
+ 
+ def guardar_criterios_apertura(verde_max, amarillo_max, usuario: str) -> dict:
+@@ -60,3 +90,53 @@ def guardar_criterios_apertura(verde_max, amarillo_max, usuario: str) -> dict:
+         escribir_json_seguro(RUTA_CRITERIOS,
+             {"version": 1, "apertura": actual, "historial": historial}, lanzar=True)
+     return actual
++
++
++def _ruta_instantanea(ejecucion_id: str) -> Path:
++    identificador = str(ejecucion_id or "").strip()
++    if not identificador or identificador in {".", ".."} or "/" in identificador \
++            or "\\" in identificador:
++        raise ValueError("El identificador de ejecución no es válido.")
++    return RUTA_INSTANTANEAS / f"{identificador}.json"
++
++
++def guardar_instantanea_ejecucion(ejecucion_id: str, *, verde_max, amarillo_max,
++                                  origen: str, usuario: str | None = None) -> dict:
++    """Registra los rangos USADOS por una ejecución, sin tocar la preferencia.
++
++    ``origen`` explica de dónde salieron: ``predeterminado`` (6/7 ms),
++    ``vigente`` (preferencia guardada) o ``elegido`` (confirmados ahora).
++    """
++    if origen not in ORIGENES_INSTANTANEA:
++        raise ValueError(f"Origen de instantánea no válido: {origen!r}")
++    verde, amarillo = _validar(verde_max, amarillo_max)
++    instantanea = {
++        "version": 1, "ejecucion_id": str(ejecucion_id),
++        "verde_max": verde, "amarillo_max": amarillo, "origen": origen,
++        "usuario": usuario, "confirmado_en": datetime.now().isoformat(timespec="microseconds"),
++    }
++    ruta = _ruta_instantanea(ejecucion_id)
++    with _lock:
++        escribir_json_seguro(ruta, instantanea, lanzar=True)
++    return instantanea
++
++
++def cargar_instantanea_ejecucion(ejecucion_id: str) -> dict | None:
++    try:
++        ruta = _ruta_instantanea(ejecucion_id)
++    except ValueError:
++        return None
++    with _lock:
++        if not ruta.exists():
++            return None
++        try:
++            datos = json.loads(ruta.read_text(encoding="utf-8"))
++        except (OSError, json.JSONDecodeError):
++            return None
++    if not isinstance(datos, dict) or datos.get("version") != 1:
++        return None
++    try:
++        _validar(datos.get("verde_max"), datos.get("amarillo_max"))
++    except (ValueError, TypeError):
++        return None
++    return datos
+diff --git a/dashboard/backend/app.py b/dashboard/backend/app.py
+index b365f4c..4038384 100644
+--- a/dashboard/backend/app.py
++++ b/dashboard/backend/app.py
+@@ -56,6 +56,13 @@ from ocr_engine import rotar_imagen_libre  # noqa: E402
+ from recursos import detectar_recursos  # noqa: E402
+ from gestor_recursos import PERFILES, normalizar_perfil, obtener_gestor_recursos  # noqa: E402
+ from flujo_empresarial import BaseConocimiento, CLAVES_PLANTILLA  # noqa: E402
++from utilidades.matriz_apertura import (  # noqa: E402
++    COLUMNAS_MATRIZ,
++    construir_matriz_dashboard,
++    criterio_desde_limites,
++    evaluar_apertura,
++    limites_predefinidos,
++)
+ from utilidades.persistencia import escribir_json_seguro  # noqa: E402
+ 
+ CONFIG = cargar_config()
+@@ -113,6 +120,9 @@ class SolicitudPipeline(BaseModel):
+     ejecucion_id: str | None = Field(default=None, max_length=128)
+     perfil_rendimiento: str = Field(default="alto", pattern="^(estable|alto|maximo)$")
+     contenido: str = Field(default="todo", pattern="^(todo|fotos|videos)$")
++    # V15.9: rangos confirmados ANTES de iniciar. Sin ellos se usa la
++    # preferencia vigente o los predeterminados 6/7 ms y se registra igual.
++    rango_apertura: RangoAperturaSolicitud | None = None
+ 
+ 
+ class SolicitudRevisionVideo(BaseModel):
+@@ -151,6 +161,26 @@ class SolicitudCriteriosApertura(BaseModel):
+     usuario: str = Field(default="dashboard", min_length=1, max_length=128)
+ 
+ 
++class RangoAperturaSolicitud(BaseModel):
++    """Rangos confirmados en el diálogo previo a «Procesar carpeta» (V15.9).
++
++    ``origen``: ``predeterminado`` (6/7 ms), ``vigente`` (preferencia guardada)
++    o ``elegido`` (capturados ahora). ``guardar_preferencia`` sólo se cumple si
++    el usuario lo marcó explícitamente; si es falso, los rangos aplican sólo a
++    este lote (instantánea) y la preferencia global no cambia.
++    """
++    verde_max: float = Field(ge=0, allow_inf_nan=False)
++    amarillo_max: float = Field(gt=0, allow_inf_nan=False)
++    origen: str = Field(default="elegido", pattern="^(predeterminado|vigente|elegido)$")
++    guardar_preferencia: bool = False
++    usuario: str = Field(default="dashboard", min_length=1, max_length=128)
++
++
++# SolicitudPipeline se define antes que este modelo; se reconstruye aquí para
++# que la anotación diferida quede resuelta antes de cualquier instanciación.
++SolicitudPipeline.model_rebuild()
++
++
+ class SolicitudRefinarZonaVideo(BaseModel):
+     prueba_id: str = Field(min_length=1, max_length=256)
+     video_id: str = Field(min_length=1, max_length=128)
+@@ -1088,6 +1118,9 @@ def _generar_excel_asociado():
+     datos = deepcopy(_cargar_datos() or {})
+     if not datos.get("resultados"):
+         raise FileNotFoundError("No hay resultados procesados para actualizar el Excel.")
++    # V15.9: mismo criterio que muestra la matriz en este momento, declarado.
++    verde_c, amarillo_c, origen_c, _instant = _limites_apertura_efectivos()
++    criterios_usados = {"verde_max": verde_c, "amarillo_max": amarillo_c, "origen": origen_c}
+     idiomas = _normalizar_idiomas_exportacion(datos.get("idiomas_exportacion") or ["es"])
+     etiquetas = {"es": "ES", "en": "EN", "de": "DE"}
+     declarados = dict(datos.get("archivos_excel") or {})
+@@ -1104,7 +1137,8 @@ def _generar_excel_asociado():
+             destino = base.with_name(f"{base.stem}_{etiquetas[idioma]}{base.suffix}")
+         generado = _generar_excel_serializado(
+             RUTA_VALIDACION, destino, CONFIG, REGLAS,
+-            ruta_plantilla=datos.get("ruta_plantilla"), datos_validacion=datos, idioma=idioma)
++            ruta_plantilla=datos.get("ruta_plantilla"), datos_validacion=datos, idioma=idioma,
++            criterios_apertura=criterios_usados)
+         generados[idioma] = str(generado)
+     return generados.get(idiomas[0]) or next(iter(generados.values()))
+ 
+@@ -1235,6 +1269,11 @@ def _exportar_excel_parcial_pipeline() -> str | None:
+             "generado_en": datetime.now().isoformat(timespec="seconds"),
+             "resultados": filas,
+         }
++        # V15.9: el Excel parcial colorea con los rangos confirmados de esta
++        # ejecución, no con una preferencia posterior ajena al lote.
++        instantanea_parcial = (estado.get("solicitud") or {}).get("criterios_apertura")
++        if instantanea_parcial:
++            datos_parciales["criterios_apertura_ejecucion"] = dict(instantanea_parcial)
+         ruta_json = RAIZ_PROYECTO / ".cache_ocr" / "validacion_excel_parcial.json"
+         resultado_json = escribir_json_seguro(ruta_json, datos_parciales)
+         if not resultado_json:
+@@ -1328,7 +1367,8 @@ def _ejecutar_pipeline_fondo(ruta: Path, nombre_excel: str | None = None,
+                              idiomas_exportacion: list[str] | None = None,
+                              ejecucion_id: str | None = None,
+                              perfil_rendimiento: str = "alto",
+-                             contenido: str = "todo") -> None:
++                             contenido: str = "todo",
++                             criterios_apertura: dict | None = None) -> None:
+ 
+     def progreso(fase: str, mensaje: str, detalle: dict | None = None) -> None:
+         detalle = dict(detalle or {})
+@@ -1365,6 +1405,12 @@ def _ejecutar_pipeline_fondo(ruta: Path, nombre_excel: str | None = None,
+ 
+     try:
+         from pipeline import ejecutar_pipeline
++        if not criterios_apertura:
++            # Reprocesos/reanálisis sin diálogo: conserva el criterio que la
++            # pantalla muestra ahora (instantánea, cambio posterior o vigente).
++            verde_c, amarillo_c, origen_c, _instant = _limites_apertura_efectivos()
++            criterios_apertura = {"verde_max": verde_c, "amarillo_max": amarillo_c,
++                                  "origen": origen_c}
+         resumen = ejecutar_pipeline(
+             ruta, al_progreso=progreso, nombre_excel=nombre_excel,
+             sobrescribir_excel=sobrescribir_excel,
+@@ -1377,7 +1423,7 @@ def _ejecutar_pipeline_fondo(ruta: Path, nombre_excel: str | None = None,
+             modo_ejecucion=modo_ejecucion, ruta_inventario=ruta_inventario,
+             zoom_forzado=zoom_forzado, idiomas_exportacion=idiomas_exportacion,
+             ejecucion_id=ejecucion_id, perfil_rendimiento=perfil_rendimiento,
+-            contenido=contenido)
++            contenido=contenido, criterios_apertura=criterios_apertura)
+         _cache.update({"mtime": None, "datos": None})
+         fase3 = (resumen.get("fases") or {}).get("fase3") or {}
+         _actualizar_pipeline(
+@@ -1426,22 +1472,9 @@ def _lote_de(fila: dict) -> str:
+     return partes[-2] if len(partes) >= 2 else "Sin lote"
+ 
+ 
+-MATRIZ_APERTURA_COLUMNAS = [
+-    {"id": "HT_UGL", "temperature_condition": "HT", "inflator_type": "UGL",
+-     "temperatura": "+85°C", "generador": "UGL", "esperados": 5},
+-    {"id": "HT_OGL", "temperature_condition": "HT", "inflator_type": "OGL",
+-     "temperatura": "+85°C", "generador": "OGL", "esperados": 5},
+-    {"id": "HT_NOM", "temperature_condition": "HT", "inflator_type": "NOM",
+-     "temperatura": "+85°C", "generador": "nominal", "esperados": 10},
+-    {"id": "RT_NOM", "temperature_condition": "RT", "inflator_type": "NOM",
+-     "temperatura": "RT", "generador": "nominal", "esperados": 10},
+-    {"id": "NT_NOM", "temperature_condition": "NT", "inflator_type": "NOM",
+-     "temperatura": "-35°C", "generador": "nominal", "esperados": 10},
+-    {"id": "NT_OGL", "temperature_condition": "NT", "inflator_type": "OGL",
+-     "temperatura": "-35°C", "generador": "OGL", "esperados": 5},
+-    {"id": "NT_UGL", "temperature_condition": "NT", "inflator_type": "UGL",
+-     "temperatura": "-35°C", "generador": "UGL", "esperados": 5},
+-]
++# Columnas de la matriz: definición única en utilidades.matriz_apertura
++# (compartida con reporte_bmg). Se conserva el nombre local por compatibilidad.
++MATRIZ_APERTURA_COLUMNAS = COLUMNAS_MATRIZ
+ 
+ 
+ def _campo_resultado(fila: dict, clave: str, *, solo_confiable: bool = False):
+@@ -1491,13 +1524,88 @@ def _normalizar_tiempos_video_fila(fila: dict) -> bool:
+         return False
+ 
+ 
++def _instantanea_ejecucion_vigente() -> dict | None:
++    """Instantánea de rangos de la ejecución cuyos resultados se están viendo."""
++    try:
++        datos = _cargar_datos()
++    except Exception:
++        datos = None
++    instantanea = (datos or {}).get("criterios_apertura_ejecucion")
++    return instantanea if isinstance(instantanea, dict) else None
++
++
++def _limites_apertura_efectivos() -> tuple[float, float, str, dict | None]:
++    """(verde, amarillo, origen, instantánea_usada) para pantalla y exportación.
++
++    Resolución documentada (V15.9): manda el cambio posterior confirmado por el
++    usuario en «Resumen»; si no lo hay, la instantánea de la ejecución que
++    produjo estos resultados; si tampoco existe, la preferencia guardada o los
++    predeterminados 6/7 ms. El origen se publica en la API para que nunca haya
++    divergencias silenciosas entre lo mostrado y lo exportado.
++    """
++    from criterios_usuario import cargar_criterios_usuario
++    from utilidades.matriz_apertura import validar_limites
++    try:
++        usuario = cargar_criterios_usuario()
++    except (OSError, ValueError, TypeError):
++        usuario = None
++    instantanea = _instantanea_ejecucion_vigente()
++    if instantanea and usuario and usuario.get("confirmado_en") and instantanea.get("confirmado_en") \
++            and str(usuario["confirmado_en"]) > str(instantanea["confirmado_en"]):
++        try:
++            verde, amarillo = validar_limites(usuario.get("verde_max"), usuario.get("amarillo_max"))
++            return verde, amarillo, "cambio_posterior_confirmado", None
++        except (ValueError, TypeError):
++            pass
++    if instantanea:
++        try:
++            verde, amarillo = validar_limites(instantanea.get("verde_max"),
++                                              instantanea.get("amarillo_max"))
++            origen = f"instantanea_ejecucion:{instantanea.get('origen') or 'elegido'}"
++            return verde, amarillo, origen, instantanea
++        except (ValueError, TypeError):
++            pass
++    if usuario:
++        try:
++            verde, amarillo = validar_limites(usuario.get("verde_max"), usuario.get("amarillo_max"))
++            return verde, amarillo, "criterios_usuario", None
++        except (ValueError, TypeError):
++            pass
++    verde, amarillo = limites_predefinidos()
++    return verde, amarillo, "predeterminado", None
++
++
++def _criterio_apertura_efectivo() -> tuple[dict, str]:
++    """Criterio textual del semáforo vigente y su origen (para la leyenda)."""
++    verde, amarillo, origen, _instantanea = _limites_apertura_efectivos()
++    return criterio_desde_limites(verde, amarillo), origen
++
++
+ def _estado_apertura_fila(fila: dict) -> tuple[str, float | None]:
+-    valor = _numero_ms(_campo_resultado(fila, "opening_time_ms", solo_confiable=True))
+-    if valor is None:
+-        return "gris", None
+-    criterio = REGLAS.get("criterios", {}).get("tiempo_apertura_ms") or {
+-        "verde": "<= 6", "amarillo": "6-7", "rojo": "> 7"}
+-    return evaluar_criterio(criterio, valor) or "gris", valor
++    """(estado, valor) del semáforo de apertura con el motor compartido V15.9.
++
++    Contrato histórico: sin valor confiable se reporta (\"gris\", None).
++    """
++    estado, valor, _motivo, _pendiente = _estado_apertura_detalle(fila)
++    return estado, valor
++
++
++def _estado_apertura_detalle(fila: dict) -> tuple[str, float | None, str, float | None]:
++    """(estado, valor_publicable, motivo, valor_pendiente).
++
++    El motivo explica cada celda gris (sin tiempo, conflicto, revisión…) y
++    ``valor_pendiente`` conserva una medida no confirmada sólo para el tooltip,
++    nunca como resultado coloreado.
++    """
++    criterio, _origen = _criterio_apertura_efectivo()
++    dato = (fila.get("campos") or {}).get("opening_time_ms")
++    if not isinstance(dato, dict):
++        dato = {"valor": dato} if dato not in {None, ""} else None
++    estado, valor, motivo = evaluar_apertura(dato, criterio)
++    if estado == "gris":
++        pendiente = valor if motivo in {"pendiente_revision", "conflicto", "sin_regla"} else None
++        return "gris", None, motivo, pendiente
++    return estado, valor, motivo, None
+ 
+ 
+ def _clave_prueba_orden(valor):
+@@ -1508,37 +1616,25 @@ def _clave_prueba_orden(valor):
+ 
+ 
+ def _matriz_apertura(filas: list[dict]) -> dict | None:
+-    if not any(str(f.get("tipo_st") or "").upper() in {"1ST", "2ST"} for f in filas):
++    """Matriz completa V15.9: todas las posiciones, vacantes visibles y sin clasificar.
++
++    Usa la definición compartida ``utilidades.matriz_apertura``: los cupos
++    ``esperados`` (5/10) se expanden si hay más casos, las posiciones sin caso
++    se pintan como ``vacante`` (sin ID ni tiempo) y los casos sin
++    etapa/temperatura/generador verificable aparecen en ``sin_clasificar``.
++    """
++    if not filas:
+         return None
+-    etapas = []
+-    for tipo_st in ("1ST", "2ST"):
+-        columnas = []
+-        etapa = [f for f in filas if str(f.get("tipo_st") or "").upper() == tipo_st]
+-        for spec in MATRIZ_APERTURA_COLUMNAS:
+-            grupo = [f for f in etapa
+-                     if str(f.get("temperature_condition") or "").upper() == spec["temperature_condition"]
+-                     and str(f.get("inflator_type") or "").upper() == spec["inflator_type"]]
+-            grupo.sort(key=lambda f: _clave_prueba_orden(f.get("test_number") or f.get("identificador")),
+-                       reverse=True)
+-            alto = max(10, len(grupo))
+-            celdas = [None] * max(0, alto - len(grupo))
+-            for fila in grupo:
+-                celdas.append({
+-                    "id": fila.get("id"),
+-                    "test_number": fila.get("test_number") or fila.get("identificador") or fila.get("nombre"),
+-                    "estado": fila.get("semaforo_apertura") or "gris",
+-                    "opening_time_ms": fila.get("opening_time_ms"),
+-                    "enlace": fila.get("enlace"),
+-                })
+-            columnas.append({**spec, "celdas": celdas})
+-        etapas.append({"tipo_st": tipo_st, "columnas": columnas})
+-    return {
+-        "etapas": etapas,
+-        "regla": {**{color: f"{valor} ms" for color, valor in (
+-            REGLAS.get("criterios", {}).get("tiempo_apertura_ms") or {
+-                "verde": "<= 6", "amarillo": "6-7", "rojo": "> 7"}).items()},
+-            "gris": "valor aún no conocido"},
+-    }
++    criterio, origen = _criterio_apertura_efectivo()
++    matriz = construir_matriz_dashboard(filas, criterio, origen)
++    if matriz is None:
++        return None
++    # La API conserva el formato histórico de la leyenda («<= 6 ms»).
++    from utilidades.matriz_apertura import regla_publica
++    matriz["regla"] = regla_publica(
++        criterio, origen,
++        "sin tiempo confiable, pendiente/conflicto o posición sin caso")
++    return matriz
+ 
+ 
+ def _fila_publica(fila: dict, revisiones: dict | None = None,
+@@ -1557,7 +1653,8 @@ def _fila_publica(fila: dict, revisiones: dict | None = None,
+         "tipo": "carpeta", "item_id": item_id, "estado": inicial,
+         "oculto": False, "actualizado_en": None}
+     _normalizar_tiempos_video_fila(fila)
+-    semaforo_apertura, opening_time_ms = _estado_apertura_fila(fila)
++    semaforo_apertura, opening_time_ms, apertura_motivo, apertura_pendiente = \
++        _estado_apertura_detalle(fila)
+     return {
+         "id": item_id,
+         "nombre": fila["nombre"],
+@@ -1588,6 +1685,8 @@ def _fila_publica(fila: dict, revisiones: dict | None = None,
+                          fila.get("metadata_ruta", {}).get("inflator_type"),
+         "opening_time_ms": opening_time_ms,
+         "semaforo_apertura": semaforo_apertura,
++        "apertura_motivo": apertura_motivo,
++        "opening_time_pendiente_ms": apertura_pendiente,
+         "test_number": fila.get("test_number") or _campo_resultado(fila, "test_number"),
+         "ruta": fila.get("ruta"), "ruta_relativa": fila.get("ruta_relativa"),
+         "estructura_valida": fila.get("estructura_valida"),
+@@ -1654,13 +1753,20 @@ def estado():
+ 
+ @app.get("/api/config")
+ def config_dashboard():
+-    from criterios_usuario import cargar_criterios_usuario
++    from criterios_usuario import cargar_criterios_usuario, criterios_o_predeterminados
+     advertencia = None
+     try:
+         criterios_usuario = cargar_criterios_usuario()
+     except (OSError, ValueError, TypeError) as exc:
+         criterios_usuario = None
+         advertencia = f"No se pudieron leer los límites elegidos; revisa antes de valorar: {exc}"
++    try:
++        vigentes = criterios_o_predeterminados()
++    except (OSError, ValueError, TypeError):
++        vigentes = None
++    verde_def, amarillo_def = limites_predefinidos()
++    criterio_efectivo, origen_efectivo = _criterio_apertura_efectivo()
++    instantanea = _instantanea_ejecucion_vigente()
+     return {
+         "nombre_herramienta": "OCR Versuchsmatrix",
+         "colores": CONFIG.get("colores", {}),
+@@ -1669,6 +1775,11 @@ def config_dashboard():
+         "idiomas_exportacion": ["es", "en", "de"],
+         "criterios_usuario": criterios_usuario,
+         "advertencia_criterios": advertencia,
++        # V15.9: diálogo previo a «Procesar carpeta».
++        "criterios_predeterminados": {"verde_max": verde_def, "amarillo_max": amarillo_def},
++        "criterios_vigentes": vigentes,
++        "criterio_efectivo": {"limites": criterio_efectivo, "origen": origen_efectivo},
++        "instantanea_ejecucion": instantanea,
+     }
+ 
+ 
+@@ -2647,6 +2758,48 @@ def anotar_region_externa(solicitud: SolicitudRegionExterna):
+     return resultado
+ 
+ 
++def _resolver_instantanea_para_ejecucion(ejecucion_id: str,
++                                         rango: "RangoAperturaSolicitud | None") -> dict:
++    """Instantánea de rangos de ESTA ejecución, fijada antes de procesar nada.
++
++    - Reanudación de checkpoint: conserva la instantánea original del mismo
++      ``ejecucion_id`` (no cambian los colores a mitad de lote).
++    - Diálogo con rangos: registra lo confirmado; guarda preferencia global
++      sólo si el usuario lo pidió explícitamente.
++    - Sin diálogo: registra la preferencia vigente o los predeterminados 6/7 ms.
++    """
++    from criterios_usuario import (
++        cargar_instantanea_ejecucion,
++        criterios_o_predeterminados,
++        guardar_criterios_apertura,
++        guardar_instantanea_ejecucion,
++        reglas_apertura,
++    )
++    try:
++        existente = cargar_instantanea_ejecucion(ejecucion_id)
++    except (OSError, ValueError, TypeError):
++        existente = None
++    if existente:
++        return existente
++    try:
++        if rango is not None:
++            if rango.guardar_preferencia:
++                actual = guardar_criterios_apertura(
++                    rango.verde_max, rango.amarillo_max, rango.usuario)
++                REGLAS.setdefault("criterios", {})["tiempo_apertura_ms"] = reglas_apertura(actual)
++            return guardar_instantanea_ejecucion(
++                ejecucion_id, verde_max=rango.verde_max, amarillo_max=rango.amarillo_max,
++                origen=rango.origen, usuario=rango.usuario)
++        vigente = criterios_o_predeterminados()
++        return guardar_instantanea_ejecucion(
++            ejecucion_id, verde_max=vigente["verde_max"], amarillo_max=vigente["amarillo_max"],
++            origen=vigente["origen"], usuario=vigente.get("usuario"))
++    except ValueError as exc:
++        raise HTTPException(422, f"Los rangos de apertura no son válidos: {exc}") from exc
++    except OSError as exc:
++        raise HTTPException(503, "No se pudo registrar la instantánea de rangos; no se inicia el procesamiento.") from exc
++
++
+ @app.post("/api/pipeline", status_code=202)
+ def iniciar_pipeline(solicitud: SolicitudPipeline):
+     global _pipeline_hilo
+@@ -2712,6 +2865,10 @@ def iniciar_pipeline(solicitud: SolicitudPipeline):
+         _pipeline_cancelar.clear()
+         _pipeline_detener_fin_id.clear()
+         ejecucion_id = str(solicitud.ejecucion_id or uuid.uuid4().hex)
++        # V15.9: la instantánea de rangos se fija ANTES de cualquier trabajo y
++        # explica el semáforo de esta ejecución. Si el usuario marcó «Guardar
++        # para próximas carpetas», además se persiste como preferencia.
++        instantanea = _resolver_instantanea_para_ejecucion(ejecucion_id, solicitud.rango_apertura)
+         es_reanudacion_checkpoint = (
+             _pipeline_estado.get("estado") == "reanudando" and
+             str(_pipeline_estado.get("ejecucion_id") or "") == ejecucion_id
+@@ -2734,6 +2891,7 @@ def iniciar_pipeline(solicitud: SolicitudPipeline):
+             "ejecucion_id": ejecucion_id,
+             "perfil_rendimiento": perfil_rendimiento,
+             "contenido": solicitud.contenido,
++            "criterios_apertura": dict(instantanea),
+         }
+         _pipeline_estado.update({
+             "estado": "procesando", "fase": "preparando",
+@@ -2778,9 +2936,11 @@ def iniciar_pipeline(solicitud: SolicitudPipeline):
+         "ejecucion_id": ejecucion_id,
+         "perfil_rendimiento": perfil_rendimiento,
+         "contenido": solicitud.contenido,
++        "criterios_apertura": dict(instantanea),
+     }, daemon=True)
+     _pipeline_hilo.start()
+-    return {"aceptado": True, "ruta": str(ruta), "estado": "procesando"}
++    return {"aceptado": True, "ruta": str(ruta), "estado": "procesando",
++            "criterios_apertura": dict(instantanea)}
+ 
+ 
+ @app.post("/api/pipeline/pausar")
+@@ -3078,13 +3238,23 @@ def exportar_resultados(solicitud: SolicitudExportacion):
+     base=Path(datos.get("nombre_excel_base") or datos.get("archivo_excel") or (RAIZ_PROYECTO / CONFIG.get("fase3",{}).get("archivo_salida","resultado_maestro.xlsx")))
+     if not base.is_absolute(): base=RAIZ_PROYECTO/base
+     generados=[]
++    # V15.9: el libro usa el mismo criterio que muestra la matriz ahora mismo
++    # (cambio posterior confirmado > instantánea de la ejecución) y lo declara.
++    verde_c, amarillo_c, origen_c, instantanea_c = _limites_apertura_efectivos()
++    criterios_usados = {"verde_max": verde_c, "amarillo_max": amarillo_c, "origen": origen_c}
+     for idioma in idiomas:
+         destino=base.with_name(f"{base.stem}_{permitidos[idioma]}.xlsx")
+         try:
+-            generado=_generar_excel_serializado(RUTA_VALIDACION,destino,CONFIG,REGLAS,ruta_plantilla=datos.get("ruta_plantilla"),datos_validacion=datos,idioma=idioma)
++            generado=_generar_excel_serializado(RUTA_VALIDACION,destino,CONFIG,REGLAS,ruta_plantilla=datos.get("ruta_plantilla"),datos_validacion=datos,idioma=idioma,criterios_apertura=criterios_usados)
+         except PermissionError as exc: raise HTTPException(423,str(exc)) from exc
+         generados.append({"idioma":idioma,"nombre":Path(generado).name,"url":f"/api/resultados/exportado?archivo={quote(Path(generado).name)}"})
+-    return {"generados":generados,"instantanea":datos.get("generado_en"),"reutilizo_ocr":True}
++    return {"generados":generados,"instantanea":datos.get("generado_en"),"reutilizo_ocr":True,
++            "criterios_usados":criterios_usados,
++            "nota_criterios": ("Se aplicó el cambio posterior confirmado en Resumen."
++                               if origen_c == "cambio_posterior_confirmado" else
++                               "Se aplicaron los criterios de la ejecución que produjo estos resultados."
++                               if instantanea_c else
++                               "Se aplicaron los criterios vigentes (sin instantánea de ejecución previa).")}
+ 
+ 
+ @app.get("/api/resultados/exportado")
+diff --git a/dashboard/frontend/app.js b/dashboard/frontend/app.js
+index acadc59..5955954 100644
+--- a/dashboard/frontend/app.js
++++ b/dashboard/frontend/app.js
+@@ -399,10 +399,11 @@ function EstadoError({ mensaje = "No fue posible cargar el dashboard." }) {
+ /* ----------------------------- Vistas ----------------------------- */
+ 
+ function MatrizApertura({ matriz, colores }) {
+-  if (!matriz?.etapas?.length) return null;
++  if (!matriz?.etapas?.length && !matriz?.sin_clasificar?.length) return null;
+   const paleta = {
+     verde: colores.verde || "#22c55e", amarillo: colores.amarillo || "#f59e0b",
+     rojo: colores.rojo || "#ef4444", gris: colores.gris || "#9ca3af",
++    vacante: "#d4d4d8",
+   };
+   const abrirEnListado = (item) => {
+     if (!item) return;
+@@ -414,40 +415,72 @@ function MatrizApertura({ matriz, colores }) {
+     location.hash = "#/tabla";
+   };
+   const textoTiempo = (item) => item?.opening_time_ms === null || item?.opening_time_ms === undefined
+-    ? "Tiempo de apertura aún no conocido"
++    ? (item?.tiempo_pendiente_ms != null
++      ? `Medida pendiente de revisión: ${item.tiempo_pendiente_ms} ms (no se colorea)`
++      : "Tiempo de apertura aún no conocido")
+     : `Tiempo de apertura: ${item.opening_time_ms} ms`;
++  const motivoGris = (item) => ({
++    sin_tiempo: "sin tiempo medido", pendiente_revision: "pendiente de revisión",
++    conflicto: "conflicto entre fuentes", valor_no_finito: "valor no finito descartado",
++    valor_negativo: "valor negativo descartado", sin_caso: "posición sin caso",
++  }[item?.motivo_estado] || item?.motivo_estado || "sin tiempo confiable");
++  const tituloCelda = (item) => item
++    ? `${item.test_number} · ${textoTiempo(item)}${item.estado === "gris" ? ` · ${motivoGris(item)}` : ""} · abrir en Listado`
++    : "";
+   return html`<div class="tarjeta matriz-apertura-tarjeta">
+     <div class="matriz-apertura-encabezado">
+       <div>
+         <h3 class="titulo-seccion" style=${{ margin: 0 }}>Matriz de tiempo de apertura</h3>
+         <p class="subtitulo-seccion" style=${{ marginBottom: 0 }}>
+-          1ST y 2ST en un solo resumen. Haz clic en una prueba para localizar su carpeta en el Listado.
++          1ST y 2ST en un solo resumen. Todas las posiciones esperadas se muestran:
++          gris tenue = vacante (sin caso asignado). Haz clic en una prueba para localizar su carpeta en el Listado.
+         </p>
+       </div>
+       <div class="leyenda-apertura" aria-label="Leyenda tiempo de apertura">
+         ${Object.entries(matriz.regla || {}).map(([estado, etiqueta]) => html`
+-          <span key=${estado}><i style=${{ background: paleta[estado] }}></i>${etiqueta}</span>`)}
++          <span key=${estado}><i style=${{ background: paleta[estado] || paleta.gris }}></i>${etiqueta}</span>`)}
++        <span><i style=${{ background: paleta.vacante }}></i>Vacante (posición sin caso)</span>
+       </div>
+     </div>
++    ${matriz.regla?.origen_criterio && html`<p class="subtitulo-seccion" style=${{ margin: "0 0 8px" }}>
++      Criterio aplicado: <span class="mono">${matriz.regla.origen_criterio}</span>
++      ${matriz.regla.origen_criterio === "cambio_posterior_confirmado"
++        ? " (cambio confirmado después de la ejecución)" : ""}.</p>`}
+     <div class="matrices-apertura">
+-      ${matriz.etapas.map((etapa) => html`<section class="matriz-etapa" key=${etapa.tipo_st}>
++      ${(matriz.etapas || []).map((etapa) => html`<section class="matriz-etapa" key=${etapa.tipo_st}>
+         <div class="matriz-etapa-titulo">Overview results (${etapa.tipo_st})</div>
+         <div class="matriz-apertura-grid">
+           ${etapa.columnas.map((col) => html`<div class="matriz-apertura-columna" key=${col.id}>
+             <div class="matriz-apertura-celdas">
+-              ${col.celdas.map((item, idx) => item
+-                ? html`<button key=${item.id || idx} type="button"
++              ${col.celdas.map((item, idx) => item == null
++                ? html`<span key=${`vacio-${idx}`} class="matriz-celda matriz-celda-vacia" aria-hidden="true"></span>`
++                : item.tipo === "vacante"
++                ? html`<span key=${`vacante-${idx}`} class="matriz-celda matriz-celda-vacante"
++                    title=${`Posición esperada sin caso asignado (${item.posicion}/${col.cupos})`}
++                    aria-label="Posición esperada sin caso asignado"></span>`
++                : html`<button key=${item.id || idx} type="button"
+                     class=${`matriz-celda estado-${item.estado || "gris"}`}
+                     style=${{ background: paleta[item.estado] || paleta.gris }}
+-                    title=${`${item.test_number} · ${textoTiempo(item)} · abrir en Listado`}
+-                    onClick=${() => abrirEnListado(item)}>${item.test_number}</button>`
+-                : html`<span key=${`vacio-${idx}`} class="matriz-celda matriz-celda-vacia" aria-hidden="true"></span>`)}
++                    title=${tituloCelda(item)}
++                    onClick=${() => abrirEnListado(item)}>${item.test_number}</button>`)}
+             </div>
+-            <div class="matriz-columna-meta"><strong>${col.temperatura}</strong><span>${col.generador}</span></div>
++            <div class="matriz-columna-meta"><strong>${col.temperatura}</strong><span>${col.generador}</span>
++              <small class="matriz-columna-cupos">${col.ocupados ?? "?"}/${col.esperados} esperados</small></div>
+           </div>`)}
+         </div>
+       </section>`)}
+     </div>
++    ${matriz.sin_clasificar?.length ? html`<section class="matriz-sin-clasificar">
++      <h4 class="titulo-seccion" style=${{ margin: "10px 0 4px" }}>Sin clasificar (${matriz.sin_clasificar.length})</h4>
++      <p class="subtitulo-seccion">Casos sin etapa, temperatura o generador verificable. Se cuentan aquí para que ningún caso desaparezca del resumen.</p>
++      <div class="matriz-sin-clasificar-lista">
++        ${matriz.sin_clasificar.map((item) => html`<button key=${item.id || item.test_number} type="button"
++          class=${`matriz-celda matriz-celda-fuera estado-${item.estado || "gris"}`}
++          style=${{ background: paleta[item.estado] || paleta.gris }}
++          title=${`${item.test_number} · ${item.tipo_st || "sin etapa"} · ${item.temperature_condition || "sin temperatura"} / ${item.inflator_type || "sin generador"} · ${textoTiempo(item)} · abrir en Listado`}
++          onClick=${() => abrirEnListado(item)}>${item.test_number}</button>`)}
++      </div>
++    </section>` : null}
+   </div>`;
+ }
+ 
+@@ -499,6 +532,91 @@ function EditorCriteriosApertura({config, onSaved}) {
+   </details>`;
+ }
+ 
++function DialogoRangosApertura({ config, onCancelar, onProcesar }) {
++  // V15.9 (Fase 0.5): se abre ANTES de iniciar cualquier trabajo al pulsar
++  // «Procesar carpeta». No arranca OCR, lectura de videos ni escrituras.
++  const vigentes = config?.criterios_vigentes || config?.criterios_usuario || null;
++  const defecto = config?.criterios_predeterminados || { verde_max: 6, amarillo_max: 7 };
++  const [verde, setVerde] = useState(() =>
++    vigentes?.verde_max != null ? String(vigentes.verde_max) : String(defecto.verde_max));
++  const [amarillo, setAmarillo] = useState(() =>
++    vigentes?.amarillo_max != null ? String(vigentes.amarillo_max) : String(defecto.amarillo_max));
++  const [guardarPreferencia, setGuardarPreferencia] = useState(false);
++  const [error, setError] = useState(null);
++  const origenInicial = vigentes?.origen === "vigente" ? "vigente"
++    : vigentes?.origen === "predeterminado" ? "predeterminado" : "vigente";
++
++  function validar(vRaw, aRaw) {
++    const v = Number(vRaw), a = Number(aRaw);
++    if (vRaw === "" || aRaw === "" || !Number.isFinite(v) || !Number.isFinite(a)) {
++      return { ok: false, texto: "Escribe dos números finitos en milisegundos (se admiten decimales)." };
++    }
++    if (v < 0 || a < 0) {
++      return { ok: false, texto: "Los límites no pueden ser negativos." };
++    }
++    if (v >= a) {
++      return { ok: false, texto: "Los límites deben cumplir: 0 ≤ verde < amarillo." };
++    }
++    return { ok: true, v, a };
++  }
++
++  function procesarConCampos(origen) {
++    const r = origen === "predeterminado"
++      ? { ok: true, v: Number(defecto.verde_max), a: Number(defecto.amarillo_max) }
++      : validar(verde, amarillo);
++    if (!r.ok) { setError(r.texto); return; }
++    setError(null);
++    onProcesar({ verde_max: r.v, amarillo_max: r.a, origen, guardar_preferencia: guardarPreferencia });
++  }
++
++  const vNum = Number(verde), aNum = Number(amarillo);
++  const combinacion = (Number.isFinite(vNum) && Number.isFinite(aNum) && vNum < aNum)
++    ? `Combinación definitiva: verde ≤ ${vNum} ms · ${vNum} ms < amarillo ≤ ${aNum} ms · rojo > ${aNum} ms`
++    : "Combinación definitiva: revisa los límites para verla aquí antes de iniciar.";
++
++  return html`<div class="modal-fondo" role="presentation">
++    <div class="dialogo-rangos" role="dialog" aria-modal="true" aria-label="Configurar rangos de apertura">
++      <h3 class="titulo-seccion" style=${{ marginTop: 0 }}>Configurar rangos de apertura</h3>
++      <p class="subtitulo-seccion">
++        Estos rangos sólo clasifican visualmente el tiempo de apertura del lote actual.
++        No cambian FPS, frames, el cálculo de la apertura, el consenso ni el máximo visible.
++      </p>
++      <div class="dialogo-rangos-vista-previa" aria-label="Vista previa del semáforo">
++        <span class="chip" style=${{ background: config?.colores?.verde || "#22c55e" }}>Verde</span>
++        <span class="chip" style=${{ background: config?.colores?.amarillo || "#f59e0b" }}>Amarillo</span>
++        <span class="chip" style=${{ background: config?.colores?.rojo || "#ef4444" }}>Rojo</span>
++        <span class="chip" style=${{ background: config?.colores?.gris || "#9ca3af" }}>Gris (sin tiempo fiable, pendiente o sin caso)</span>
++      </div>
++      ${vigentes && html`<p class="mono">Valores vigentes: ${vigentes.verde_max} / ${vigentes.amarillo_max} ms
++        (${vigentes.origen === "vigente" ? "preferencia guardada" : "predeterminados del proyecto"}).</p>`}
++      <div class="dialogo-rangos-campos">
++        <label>Verde hasta (ms)<input class="campo" type="number" min="0" step="any" inputMode="decimal"
++          value=${verde} onInput=${(e) => setVerde(e.target.value)} autoFocus /></label>
++        <label>Amarillo hasta (ms)<input class="campo" type="number" min="0" step="any" inputMode="decimal"
++          value=${amarillo} onInput=${(e) => setAmarillo(e.target.value)} /></label>
++      </div>
++      <p class="mono dialogo-rangos-combinacion" role="status">${String(combinacion)}</p>
++      <p class="subtitulo-seccion">Reglas: <span class="mono">verde ≤ V</span>,
++        <span class="mono">V &lt; amarillo ≤ A</span>, <span class="mono">rojo &gt; A</span>.
++        El gris nunca se sustituye por 0 ms.</p>
++      <label class="dialogo-rangos-guardar">
++        <input type="checkbox" checked=${guardarPreferencia}
++          onChange=${(e) => setGuardarPreferencia(e.target.checked)} />
++        Guardar para próximas carpetas (preferencia permanente)
++      </label>
++      ${error && html`<div class="aviso estado-error" role="alert">${error}</div>`}
++      <div class="dialogo-rangos-acciones">
++        <button type="button" class="boton boton-primario" onClick=${() => procesarConCampos("elegido")}>
++          Procesar con estos rangos</button>
++        <button type="button" class="boton" onClick=${() => procesarConCampos("predeterminado")}
++          title="Usa 6.0 / 7.0 ms sin tocar tu preferencia guardada">
++          Usar predeterminados (6 / 7 ms)</button>
++        <button type="button" class="boton" onClick=${onCancelar}>Cancelar</button>
++      </div>
++    </div>
++  </div>`;
++}
++
+ function VistaResumen() {
+   const [resumen, setResumen, errorResumen] = useApi("/api/resumen");
+   const [config, setConfig, errorConfig] = useApi("/api/config");
+@@ -578,6 +696,9 @@ function VistaCarga() {
+   const [marcadoresNuevaPlantilla, setMarcadoresNuevaPlantilla] = useState("");
+   const [registrandoPlantilla, setRegistrandoPlantilla] = useState(false);
+   const [dialogoDetencion, setDialogoDetencion] = useState(false);
++  // V15.9: diálogo de rangos previo a iniciar el procesamiento del lote.
++  const [dialogoRangos, setDialogoRangos] = useState(false);
++  const [configRangos, setConfigRangos] = useState(null);
+   const [estado, setEstado] = useState(undefined);
+   const [errorEstado, setErrorEstado] = useState(null);
+   const [enviando, setEnviando] = useState(false);
+@@ -653,6 +774,23 @@ function VistaCarga() {
+   const procesar = async (ev) => {
+     ev.preventDefault();
+     setErrorEnvio(null);
++    // V15.9: ANTES de cualquier trabajo aparece «Configurar rangos de apertura».
++    // El usuario puede continuar sin tocar nada (predeterminados 6/7 ms).
++    try {
++      const config = await pedirJSON("/api/config");
++      setConfigRangos(config);
++      setDialogoRangos(true);
++    } catch (e) {
++      // Sin configuración disponible se permite continuar con defaults locales.
++      setConfigRangos({ criterios_predeterminados: { verde_max: 6, amarillo_max: 7 },
++        criterios_vigentes: null, colores: {} });
++      setDialogoRangos(true);
++    }
++  };
++
++  const confirmarProcesamiento = async (rango) => {
++    setDialogoRangos(false);
++    setErrorEnvio(null);
+     setEnviando(true);
+     try {
+       await enviarJSON("/api/pipeline", {
+@@ -664,6 +802,10 @@ function VistaCarga() {
+         contenido,
+         idiomas_exportacion: idiomasExportacion,
+         ruta_inventario: null,
++        rango_apertura: rango ? {
++          verde_max: rango.verde_max, amarillo_max: rango.amarillo_max,
++          origen: rango.origen, guardar_preferencia: !!rango.guardar_preferencia,
++        } : null,
+       });
+       const nueva = {
+         ruta: ruta.trim(), nombre_excel: nombreExcel.trim(),
+@@ -1044,6 +1186,10 @@ function VistaCarga() {
+       ${errorReanalisisVideos && html`<div class="mensaje-error" role="alert">${errorReanalisisVideos}</div>`}
+     </div>
+ 
++    ${dialogoRangos && html`<${DialogoRangosApertura} config=${configRangos}
++      onCancelar=${() => { setDialogoRangos(false); setConfigRangos(null); }}
++      onProcesar=${confirmarProcesamiento} />`}
++
+     ${dialogoDetencion && html`<div class="modal-fondo" role="presentation"
+       onClick=${(e) => { if (e.target === e.currentTarget) setDialogoDetencion(false); }}>
+       <section class="modal-detencion" role="dialog" aria-modal="true" aria-labelledby="titulo-detencion">
+@@ -2907,6 +3053,16 @@ function TarjetaVideoAirbag({ video, pruebaId, onSaved, bloqueado = false }) {
+   const inicioZonaRef = useRef(null);
+   const zoomZonaRef = useRef(null);
+   const inicioNacimientoRef = useRef(null);
++  // V15.9 (Fase 3): zoom de inspección general, independiente del modo ROI.
++  // Disponible en todos los cuadros; no altera coordenadas guardadas ni datos
++  // de entrenamiento (los overlays siguen en % de la imagen).
++  const [zoomInspector, setZoomInspector] = useState(100);
++  const [lupaActiva, setLupaActiva] = useState(false);
++  const [overlayRoi, setOverlayRoi] = useState(true);
++  const [overlaySugerida, setOverlaySugerida] = useState(true);
++  const [overlayNacimiento, setOverlayNacimiento] = useState(true);
++  const visorInspectorRef = useRef(null);
++  const PASOS_ZOOM = [100, 200, 400, 800];
+ 
+   const fpsOverlay = fpsGrabacionOverlayVideo(video);
+   const fpsActual = Number(infoTiempo?.fps || fpsOverlay || video.fps_grabacion || video.fps || 0);
+@@ -3020,6 +3176,28 @@ function TarjetaVideoAirbag({ video, pruebaId, onSaved, bloqueado = false }) {
+     }
+   }
+   function moverFrame(delta) { cambiarFrame(Number(frame || 0) + delta); }
++  // V15.9: zoom del visor principal por pasos fijos 100/200/400/800 (o ajuste
++  // a pantalla con 0). La transformación imagen↔visor es única: los overlays
++  // se posicionan en % de la imagen, así que el zoom nunca las recoloca.
++  function zoomPaso(direccion) {
++    const idx = PASOS_ZOOM.indexOf(zoomInspector);
++    const actual = idx >= 0 ? idx : PASOS_ZOOM.findIndex((p) => p > zoomInspector);
++    const siguiente = Math.max(0, Math.min(PASOS_ZOOM.length - 1, (actual < 0 ? 0 : actual) + direccion));
++    setZoomInspector(PASOS_ZOOM[siguiente]);
++  }
++  function ruedaZoomInspector(e) {
++    e.preventDefault();
++    zoomPaso(e.deltaY < 0 ? 1 : -1);
++  }
++  function dobleClicZoom() {
++    setZoomInspector((z) => (z > 100 ? 100 : 400));
++  }
++  function pantallaCompleta() {
++    const el = visorInspectorRef.current;
++    if (!el) return;
++    if (document.fullscreenElement) document.exitFullscreen?.();
++    else el.requestFullscreen?.();
++  }
+   function tecladoVideo(e) {
+     const tag = String(e.target?.tagName || "").toUpperCase();
+     if (["INPUT", "BUTTON", "SELECT", "TEXTAREA"].includes(tag) || modoZona) return;
+@@ -3027,6 +3205,11 @@ function TarjetaVideoAirbag({ video, pruebaId, onSaved, bloqueado = false }) {
+     if (e.key === "ArrowRight") { e.preventDefault(); moverFrame(e.shiftKey ? 10 : 1); }
+     if (e.key === "Home") { e.preventDefault(); cambiarFrame(0); }
+     if (e.key === "End") { e.preventDefault(); cambiarFrame(maxFrame); }
++    if (e.key === "+" || e.key === "=") { e.preventDefault(); zoomPaso(1); }
++    if (e.key === "-" || e.key === "_") { e.preventDefault(); zoomPaso(-1); }
++    if (e.key === "0") { e.preventDefault(); setZoomInspector(100); }
++    if (e.key.toLowerCase() === "f") { e.preventDefault(); pantallaCompleta(); }
++    if (e.key.toLowerCase() === "l") { e.preventDefault(); setLupaActiva((v) => !v); }
+   }
+ 
+   async function recalcularEsteVideo() {
+@@ -3396,16 +3579,52 @@ function TarjetaVideoAirbag({ video, pruebaId, onSaved, bloqueado = false }) {
+     </div>
+     <div class="video-airbag-grid">
+       <div class=${`video-airbag-preview ${modoZona ? "seleccionando-zona" : ""}`}>
+-        <div class="video-frame-zona-lienzo" style=${{aspectRatio: proporcion}} onPointerDown=${iniciarZona} onPointerMove=${moverZona}
+-          onPointerUp=${terminarZona} onPointerCancel=${terminarZona}>
++        <div class="video-inspector-barra" role="toolbar" aria-label="Zoom e inspección del cuadro">
++          <span class="chip neutro">Zoom ${zoomInspector}%</span>
++          <button type="button" class="boton boton-compacto" onClick=${() => zoomPaso(-1)} disabled=${zoomInspector <= 100}>−</button>
++          <button type="button" class="boton boton-compacto" onClick=${() => zoomPaso(1)} disabled=${zoomInspector >= 800}>+</button>
++          ${PASOS_ZOOM.map((p) => html`<button key=${p} type="button"
++            class=${`boton boton-compacto ${zoomInspector === p ? "boton-primario" : ""}`}
++            onClick=${() => setZoomInspector(p)}>${p}%</button>`)}
++          <button type="button" class="boton boton-compacto" onClick=${() => setZoomInspector(100)}>Ajustar a pantalla</button>
++          <button type="button" class="boton boton-compacto" onClick=${pantallaCompleta} title="Pantalla completa (tecla F)">⛶</button>
++          <button type="button" class=${`boton boton-compacto ${lupaActiva ? "boton-primario" : ""}`}
++            onClick=${() => setLupaActiva((v) => !v)} title="Lupa temporal F-1/F/F+1 (tecla L)">Lupa F±1</button>
++          <span class="video-inspector-overlays">
++            <label><input type="checkbox" checked=${overlayRoi} onChange=${(e) => setOverlayRoi(e.target.checked)} /> ROI</label>
++            <label><input type="checkbox" checked=${overlaySugerida} onChange=${(e) => setOverlaySugerida(e.target.checked)} /> Sugerida</label>
++            <label><input type="checkbox" checked=${overlayNacimiento} onChange=${(e) => setOverlayNacimiento(e.target.checked)} /> Nacimiento</label>
++          </span>
++        </div>
++        <div class="video-inspector-marco" ref=${visorInspectorRef} onWheel=${ruedaZoomInspector}>
++        <div class="video-frame-zona-lienzo" style=${{aspectRatio: proporcion, width: zoomInspector > 100 ? `${zoomInspector}%` : undefined, maxWidth: "none"}}
++          onPointerDown=${iniciarZona} onPointerMove=${moverZona}
++          onPointerUp=${terminarZona} onPointerCancel=${terminarZona} onDblClick=${dobleClicZoom}>
+           <img ref=${imgZonaRef} src=${rutaFrameMostrada} alt=${`Cuadro ${frame} de ${video.nombre || "video"}`} draggable="false" />
+-          ${zonaVisible && html`<div class=${`video-zona-overlay ${zonaTemporal ? "temporal" : "aprendida"} ${zonaBloqueada && !zonaTemporal ? "bloqueada" : ""}`}
++          ${zonaVisible && overlayRoi && html`<div class=${`video-zona-overlay ${zonaTemporal ? "temporal" : "aprendida"} ${zonaBloqueada && !zonaTemporal ? "bloqueada" : ""}`}
+             style=${estiloZona(zonaVisible)}><span>${zonaTemporal ? "ROI general" : `${tipoCamara || "Zona"}${zonaBloqueada ? " · bloqueada" : ""}`}</span></div>`}
+-          ${mostrarNacimiento && html`<div class=${`video-zona-nacimiento-overlay ${detalleNacimientoVisible?.metodo === "manual_dashboard" ? "manual" : "automatica"}`}
++          ${mostrarNacimiento && overlayNacimiento && html`<div class=${`video-zona-nacimiento-overlay ${detalleNacimientoVisible?.metodo === "manual_dashboard" ? "manual" : "automatica"}`}
+             style=${estiloZona(zonaNacimientoVisible)}><span>◎ Nacimiento</span></div>`}
+-          ${!zonaTemporal && zonaSugerida && html`<div class="video-zona-overlay sugerida" style=${estiloZona(zonaSugerida)}><span>Sugerida</span></div>`}
++          ${!zonaTemporal && zonaSugerida && overlaySugerida && html`<div class="video-zona-overlay sugerida" style=${estiloZona(zonaSugerida)}><span>Sugerida</span></div>`}
+           ${errorFrame && html`<div class="video-frame-error">No se pudo cargar el cuadro ${Math.round(frame)}</div>`}
+         </div>
++        </div>
++        ${lupaActiva && html`<div class="video-lupa-temporal" role="group" aria-label="Lupa temporal F-1, F, F+1">
++          ${[-1, 0, 1].map((delta) => {
++            const indice = Math.max(0, Math.min(maxFrame, Math.round(frame) + delta));
++            const foco = Array.isArray(zonaNacimientoVisible) ? zonaNacimientoVisible
++              : (zonaVisible || zonaAuto || null);
++            const cx = foco ? ((foco[0] + foco[2]) / 2) * 100 : 50;
++            const cy = foco ? ((foco[1] + foco[3]) / 2) * 100 : 50;
++            return html`<figure key=${delta} class="video-lupa-panel">
++              <img src=${`/api/video/frame?ruta=${encodeURIComponent(video.ruta || "")}&frame=${indice}`}
++                alt=${`Lupa cuadro ${indice}`} draggable="false"
++                style=${{ transformOrigin: `${cx}% ${cy}%`, transform: "scale(3)" }} />
++              <figcaption>${delta === 0 ? "F (actual)" : delta < 0 ? "F−1" : "F+1"} · cuadro ${indice}</figcaption>
++            </figure>`;
++          })}
++          <small class="video-lupa-nota">Mismo punto espacial en los tres cuadros para comparar el primer indicio.</small>
++        </div>`}
+         ${(modoZona && zonaTemporal) && html`<div class="video-zona-zoom">
+           <div class="video-zona-zoom-cabecera">
+             <div><strong>Zoom exacto del nacimiento</strong><small> se acerca automáticamente al primer fragmento</small></div>
+@@ -3472,7 +3691,7 @@ function TarjetaVideoAirbag({ video, pruebaId, onSaved, bloqueado = false }) {
+               readOnly aria-readonly="true" title="El tiempo se sincroniza con el cuadro, la tasa real Rec…fps y el reloj superior derecho." />
+               <small>Sincronizado con el cuadro; no se guarda un tiempo contradictorio.</small></label>
+           </div>
+-          <small class="atajos-video">Atajos: ←/→ = 1 cuadro · Shift+←/→ = 10 cuadros · Inicio/Fin = extremos.</small>
++          <small class="atajos-video">Atajos: ←/→ = 1 cuadro · Shift+←/→ = 10 cuadros · Inicio/Fin = extremos · +/− = zoom 100/200/400/800% · 0 = ajustar a pantalla · F = pantalla completa · L = lupa F±1.</small>
+           <div class="acciones-revision-video">
+             <button type="button" class="boton boton-primario" onClick=${()=>guardar("confirmado")}
+               disabled=${bloqueado||guardando||cargandoTiempo||recalculandoVideo}>✓ Confirmar apertura aquí</button>
+diff --git a/dashboard/frontend/estilos.css b/dashboard/frontend/estilos.css
+index 4235a20..438059e 100644
+--- a/dashboard/frontend/estilos.css
++++ b/dashboard/frontend/estilos.css
+@@ -1288,3 +1288,91 @@ html[data-tema="oscuro"] .logo-grafico {
+   padding-top: 12px;
+   border-top: 1px solid var(--borde, #64748b);
+ }
++
++/* ============================ V15.9 =====================================
++   Diálogo de rangos previo a «Procesar carpeta», matriz completa con
++   posiciones vacantes y zoom/lupa de inspección del video. */
++.dialogo-rangos {
++  width: min(560px, 94vw);
++  max-height: 88vh;
++  overflow: auto;
++  padding: 18px 20px;
++  border-radius: 14px;
++  background: var(--superficie, #101827);
++  border: 1px solid var(--borde, #334155);
++  box-shadow: 0 18px 48px rgba(0, 0, 0, .45);
++}
++.dialogo-rangos-vista-previa { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
++.dialogo-rangos-vista-previa .chip { color: #0b1220; font-weight: 700; }
++.dialogo-rangos-campos { display: flex; flex-wrap: wrap; gap: 12px; margin: 10px 0; }
++.dialogo-rangos-campos label { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; }
++.dialogo-rangos-campos .campo { width: 150px; }
++.dialogo-rangos-combinacion { margin: 6px 0; }
++.dialogo-rangos-guardar { display: flex; align-items: center; gap: 8px; margin: 8px 0; font-size: 12.5px; }
++.dialogo-rangos-acciones { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 14px; }
++
++/* Matriz: posición esperada sin caso (gris tenue, distinto del gris de valor
++   no confiable) y grupo «Sin clasificar» navegable al Listado. */
++.matriz-celda-vacante {
++  background: #d4d4d8;
++  border: 1px dashed #a1a1aa;
++  border-radius: 6px;
++  opacity: .85;
++}
++.leyenda-apertura .matriz-celda-vacante,
++.matriz-celda-vacante { display: inline-block; }
++.matriz-columna-cupos { display: block; opacity: .75; font-size: 10.5px; }
++.matriz-sin-clasificar-lista { display: flex; flex-wrap: wrap; gap: 6px; }
++.matriz-celda-fuera { min-width: 44px; min-height: 29px; border: 1px solid var(--borde, #334155); }
++
++/* Zoom de inspección general (independiente del modo ROI) y lupa temporal. */
++.video-inspector-barra {
++  display: flex;
++  flex-wrap: wrap;
++  align-items: center;
++  gap: 6px;
++  margin-bottom: 8px;
++}
++.video-inspector-barra .boton-compacto { min-height: 28px; padding: 4px 9px; font-size: 11.5px; }
++.video-inspector-overlays {
++  display: inline-flex;
++  gap: 10px;
++  margin-left: auto;
++  font-size: 11.5px;
++  opacity: .92;
++}
++.video-inspector-overlays label { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
++.video-inspector-marco {
++  width: 100%;
++  overflow: auto;
++  max-height: 68vh;
++  border-radius: 10px;
++  background: #050b14;
++}
++.video-inspector-marco:fullscreen { max-height: none; border-radius: 0; background: #000; }
++.video-lupa-temporal {
++  display: flex;
++  flex-wrap: wrap;
++  gap: 10px;
++  align-items: flex-start;
++  margin-top: 10px;
++  padding: 8px;
++  border: 1px solid var(--borde, #334155);
++  border-radius: 10px;
++}
++.video-lupa-panel {
++  margin: 0;
++  width: 150px;
++}
++.video-lupa-panel img {
++  width: 150px;
++  height: 100px;
++  object-fit: cover;
++  overflow: hidden;
++  display: block;
++  border-radius: 7px;
++  border: 1px solid var(--borde, #334155);
++  background: #050b14;
++}
++.video-lupa-panel figcaption { font-size: 10.5px; opacity: .85; margin-top: 3px; }
++.video-lupa-nota { flex: 1 1 180px; font-size: 11px; opacity: .8; }
+diff --git a/dashboard/frontend/i18n.js b/dashboard/frontend/i18n.js
+index 01209a6..af9a5ba 100644
+--- a/dashboard/frontend/i18n.js
++++ b/dashboard/frontend/i18n.js
+@@ -784,6 +784,50 @@
+       for(const a of ["title","placeholder","aria-label"]){ const v=el.getAttribute(a); if(v){ const tv=translateValue(v); if(tv!==v) el.setAttribute(a,tv); } }
+     });
+   }
++  // V15.9: diálogo de rangos previo a procesar, matriz completa y zoom/lupa.
++  Object.assign(D.en, {
++    "Configurar rangos de apertura":"Configure opening ranges",
++    "Estos rangos sólo clasifican visualmente el tiempo de apertura del lote actual. No cambian FPS, frames, el cálculo de la apertura, el consenso ni el máximo visible.":"These ranges only classify the opening time of this batch visually. They do not change FPS, frames, the opening calculation, the consensus or the maximum visible deployment.",
++    "Gris (sin tiempo fiable, pendiente o sin caso)":"Grey (no reliable time, pending or no case)",
++    "Procesar con estos rangos":"Process with these ranges",
++    "Usar predeterminados (6 / 7 ms)":"Use defaults (6 / 7 ms)",
++    "Usa 6.0 / 7.0 ms sin tocar tu preferencia guardada":"Uses 6.0 / 7.0 ms without touching your saved preference",
++    "Guardar para próximas carpetas (preferencia permanente)":"Save for next folders (permanent preference)",
++    "Escribe dos números finitos en milisegundos (se admiten decimales).":"Enter two finite numbers in milliseconds (decimals allowed).",
++    "Los límites no pueden ser negativos.":"Limits cannot be negative.",
++    "Combinación definitiva: revisa los límites para verla aquí antes de iniciar.":"Final combination: fix the limits to see it here before starting.",
++    "Todas las posiciones esperadas se muestran: gris tenue = vacante (sin caso asignado). Haz clic en una prueba para localizar su carpeta en el Listado.":"All expected positions are shown: light grey = vacant (no assigned case). Click a test to locate its folder in the List.",
++    "Vacante (posición sin caso)":"Vacant (position without case)",
++    "Posición esperada sin caso asignado":"Expected position without assigned case",
++    "Casos sin etapa, temperatura o generador verificable. Se cuentan aquí para que ningún caso desaparezca del resumen.":"Cases without verifiable stage, temperature or generator. They are counted here so no case disappears from the summary.",
++    "Ajustar a pantalla":"Fit to screen",
++    "Lupa F±1":"Magnifier F±1",
++    "Mismo punto espacial en los tres cuadros para comparar el primer indicio.":"Same spatial point in all three frames to compare the first trace.",
++    "Zoom e inspección del cuadro":"Frame zoom and inspection",
++    "Lupa temporal F-1, F, F+1":"Temporal magnifier F-1, F, F+1"
++  });
++  Object.assign(D.de, {
++    "Configurar rangos de apertura":"Öffnungsbereiche konfigurieren",
++    "Estos rangos sólo clasifican visualmente el tiempo de apertura del lote actual. No cambian FPS, frames, el cálculo de la apertura, el consenso ni el máximo visible.":"Diese Bereiche klassifizieren nur visuell die Öffnungszeit des aktuellen Loses. Sie ändern weder FPS, Bilder, die Öffnungsberechnung, den Konsens noch die maximale sichtbare Entfaltung.",
++    "Gris (sin tiempo fiable, pendiente o sin caso)":"Grau (keine zuverlässige Zeit, ausstehend oder kein Fall)",
++    "Procesar con estos rangos":"Mit diesen Bereichen verarbeiten",
++    "Usar predeterminados (6 / 7 ms)":"Standardwerte verwenden (6 / 7 ms)",
++    "Usa 6.0 / 7.0 ms sin tocar tu preferencia guardada":"Verwendet 6.0 / 7.0 ms, ohne Ihre gespeicherte Präferenz zu ändern",
++    "Guardar para próximas carpetas (preferencia permanente)":"Für nächste Ordner speichern (dauerhafte Präferenz)",
++    "Escribe dos números finitos en milisegundos (se admiten decimales).":"Geben Sie zwei endliche Zahlen in Millisekunden ein (Dezimalzahlen erlaubt).",
++    "Los límites no pueden ser negativos.":"Grenzwerte dürfen nicht negativ sein.",
++    "Combinación definitiva: revisa los límites para verla aquí antes de iniciar.":"Endgültige Kombination: korrigieren Sie die Grenzwerte, um sie hier vor dem Start zu sehen.",
++    "Todas las posiciones esperadas se muestran: gris tenue = vacante (sin caso asignado). Haz clic en una prueba para localizar su carpeta en el Listado.":"Alle erwarteten Positionen werden angezeigt: hellgrau = frei (kein Fall zugeordnet). Klicken Sie auf einen Test, um seinen Ordner in der Liste zu finden.",
++    "Vacante (posición sin caso)":"Frei (Position ohne Fall)",
++    "Posición esperada sin caso asignado":"Erwartete Position ohne zugeordneten Fall",
++    "Casos sin etapa, temperatura o generador verificable. Se cuentan aquí para que ningún caso desaparezca del resumen.":"Fälle ohne überprüfbare Stufe, Temperatur oder Generator. Sie werden hier gezählt, damit kein Fall aus der Übersicht verschwindet.",
++    "Ajustar a pantalla":"An Bildschirm anpassen",
++    "Lupa F±1":"Lupe F±1",
++    "Mismo punto espacial en los tres cuadros para comparar el primer indicio.":"Derselbe räumliche Punkt in allen drei Bildern, um die erste Spur zu vergleichen.",
++    "Zoom e inspección del cuadro":"Zoom und Prüfung des Bildes",
++    "Lupa temporal F-1, F, F+1":"Zeitlupe-Lupe F-1, F, F+1"
++  });
++
+   window.OCR_I18N={
+     get:lang, locale:()=>locale[lang()]||locale.es, t:translateValue,
+     set:(v)=>{if(VALID.includes(v)){localStorage.setItem(KEY,v);location.reload();}}, apply:traducirTexto
+diff --git a/docs/README.md b/docs/README.md
+index 0287f36..aac5af8 100644
+--- a/docs/README.md
++++ b/docs/README.md
+@@ -1,7 +1,9 @@
+ # Documentación del proyecto
+ 
+-Versión **V15.8.1**: organización de guías, informes, historial y parches, sobre
+-las funciones de V15.8. Sin cambios en el motor OCR ni en los datos del usuario.
++Versión **V15.9.0**: rangos de apertura antes de procesar, ROI/microzona,
++zoom del visor, matriz completa y consenso 3-de-4 sobre las funciones de
++V15.8.1. Sin cambios en los límites de medición ni en los identificadores
++del Excel.
+ 
+ Para instalar o iniciar el programa, comienza por el [README principal](../README.md).
+ La reorganización sólo cambia la ubicación de notas e informes: no mueve código,
+@@ -9,12 +11,15 @@ dependencias, datos, aprendizaje ni archivos de salida.
+ 
+ ## Guías actuales
+ 
++- [Funciones y uso de V15.9: rangos, ROI, zoom, matriz y consenso](guias/LEEME_V15_9_APERTURA_ROI_ZOOM_MATRIZ.md).
+ - [Funciones y uso de V15.8: etiquetas, ruptura, máximo visible y rangos](guias/LEEME_V15_8_GUIA_RUPTURA_MAXIMO.md).
+ - [Instalación multiplataforma y diagnóstico CPU/GPU](instalacion_multiplataforma.md).
+ - [Notas de instalación V15 del paquete original](guias/LEEME_INSTALACION_V15.txt).
+ 
+ ## Informes y validación
+ 
++- [Cambios y pruebas de V15.9](informes/RESULTADOS_PRUEBAS_V15_9.md).
++- [Aplicación de V15.9 a la carpeta del proyecto y respaldo](informes/ACTUALIZACION_CARPETA_V15_9.md).
+ - [Cambios y pruebas de V15.8](informes/RESULTADOS_PRUEBAS_V15_8.md).
+ - [Aplicación de V15.8 a la carpeta del proyecto y respaldo](informes/ACTUALIZACION_CARPETA_V15_8.md).
+ - [Informes de versiones anteriores](informes/).
+diff --git a/docs/guias/LEEME_V15_9_APERTURA_ROI_ZOOM_MATRIZ.md b/docs/guias/LEEME_V15_9_APERTURA_ROI_ZOOM_MATRIZ.md
+new file mode 100644
+index 0000000..a591a3b
+--- /dev/null
++++ b/docs/guias/LEEME_V15_9_APERTURA_ROI_ZOOM_MATRIZ.md
+@@ -0,0 +1,104 @@
++# V15.9 — Apertura, ROI, zoom y matriz completa (guía de uso)
++
++Esta guía describe las funciones nuevas de **V15.9.0** para el flujo de
++airbag (1ST/2ST). No cambia los límites de medición ni la regla de tiempos:
++FPS, frames y el cálculo de la apertura siguen intactos. Sólo cambia *qué
++haces* con los rangos, la región de interés, la inspección de cuadros y la
++matriz resumen.
++
++## 1. Rangos de apertura antes de procesar (Fase 0.5)
++
++Al pulsar **«Procesar carpeta»** aparece primero el diálogo
++**«Configurar rangos de apertura»**. No empieza ningún trabajo (ni OCR, ni
++lectura de videos, ni escrituras) hasta que elijas una acción:
++
++- **«Procesar con estos rangos»**: usa los valores escritos (p. ej. verde
++  hasta 5.5 ms y amarillo hasta 6.5 ms).
++- **«Usar predeterminados (6 / 7 ms)»**: usa los valores iniciales del
++  proyecto sin tocar tu preferencia guardada.
++- **«Cancelar»**: no procesa nada.
++
++Casilla opcional (apagada por defecto):
++**«Guardar para próximas carpetas (preferencia permanente)»**. Si no la
++marcas, los rangos elegidos sólo aplican a este lote (instantánea de la
++ejecución) y tu preferencia global queda como estaba.
++
++Reglas de validación: dos números finitos en milisegundos (se admiten
++decimales), no negativos y siempre `0 ≤ verde < amarillo`. La combinación
++definitiva se muestra antes de iniciar. El **gris nunca se sustituye por
++0 ms**: significa «sin tiempo fiable, pendiente/conflicto o sin caso».
++
++Los mismos rangos se aplican al **semáforo del dashboard** y al **Excel**;
++si después cambias los rangos en «Definir rangos del tiempo de apertura»,
++la matriz y la leyenda se actualizan (vuelve a exportar el Excel).
++
++## 2. ROI general y microzona de nacimiento (Fase 2)
++
++- La **ROI general** («dónde mirar») y la **microzona de nacimiento**
++  («dónde nació realmente») son regiones distintas.
++- Una ROI manual **bloqueada** se conserva: el sistema no la mueve ni la
++  entrena mientras esté bloqueada. Puedes revertir a la última ROI guardada.
++- La **ROI sugerida** (aprendizaje automático) sólo se aplica si la aceptas
++  explícitamente; nunca se coloca sola sobre una ROI manual confirmada.
++- El punto exacto de nacimiento se ajusta a mano en el zoom de la zona
++  («✎ Ajustar nacimiento a mano») o se afina automáticamente («◎ Afinar
++  automáticamente»). La microzona se usa para recortar el aprendizaje visual
++  (F-3…F+3), no para cambiar el tiempo de apertura.
++
++## 3. Zoom y lupa del visor de video (Fase 3)
++
++Sobre el cuadro actual dispones de una barra de inspección:
++
++- **Zoom 100 / 200 / 400 / 800 %** con botones, la rueda del ratón sobre el
++  marco, doble clic (alterna 100 ↔ 400) y teclado: `+`/`−` cambia de paso,
++  `0` ajusta a pantalla y `F` activa pantalla completa.
++- **«Lupa F±1»** (tecla `L`): muestra F−1, F y F+1 con el mismo punto
++  espacial en los tres cuadros para comparar el primer indicio.
++- **Overlays independientes**: puedes encender y apagar por separado
++  *ROI*, *Sugerida* y *Nacimiento*.
++- Los atajos de cuadro siguen igual: `←`/`→` (1 cuadro),
++  `Shift+←/→` (10 cuadros), `Inicio`/`Fin` (extremos).
++- El zoom nunca recoloca los overlays ni altera las coordenadas guardadas:
++  la transformación imagen↔visor es única.
++
++## 4. Matriz de apertura completa (Fase 4)
++
++- La matriz muestra **todas las posiciones esperadas** de HT/RT/NT ×
++  UGL/OGL/NOM para 1ST y 2ST, con sus cupos (5 o 10 según la combinación).
++- **Posición sin caso** = celda «vacante» en gris tenue con borde, sin ID ni
++  tiempo, distinta del gris de caso no confiable. Se explica en la leyenda.
++- Los cupos se expanden solos si hay más casos de los esperados.
++- **«Sin clasificar»** agrupa los casos sin etapa, temperatura o generador
++  verificable (con la causa a la vista). Se cuentan para que ningún caso
++  desaparezca del resumen. Al hacer clic en una celda se localiza su carpeta
++  en el Listado.
++- Los identificadores del Excel (1ST/2ST) no se alteran y nunca se inventan
++  identificadores ni tiempos.
++
++## 5. Consenso de videos (Fase 5)
++
++- La salida es doble: **primer instante fiable por cámara** y **resultado
++  consolidado del caso**.
++- Con **4 cámaras comparables** (o todas las disponibles si hay menos), la
++  coincidencia de **3** confirma automáticamente. Menos respaldo queda
++  **«pendiente de revisión»** (estado `propuesto` o `discordancia`) y el
++  sistema conserva el tiempo propuesto **sin aplicarlo**.
++- Estados visibles: `confirmado`, `propuesto`, `discordancia`, `sin_evento`,
++  `sin_datos` (y `evento_al_inicio` por cámara cuando la apertura ya está
++  desde el primer cuadro).
++- Las **confirmaciones humanas tienen prioridad** sobre cualquier consenso
++  automático. Las vistas de respaldo (p. ej. SCHEIBE) no definen el tiempo.
++
++## 6. Marca `evento_al_inicio` (Fase 1)
++
++Si la apertura ya es visible desde el primer cuadro, el detector lo marca
++`evento_al_inicio`: **no inventa un nacimiento en el frame 0**, conserva el
++primer indicio visible y deja el tiempo confirmado vacío (sólo queda el
++tiempo sospechoso para orientar la revisión manual).
++
++## Puntos pendientes con datos reales
++
++- La exactitud de ±1 cuadro y el acuerdo ≥ 0.95 sobre 30 casos reales
++  siguen **pendientes de validación con videos reales** (en el repositorio
++  no hay videos de ensayo).
++- Ver [RESULTADOS_PRUEBAS_V15_9](../informes/RESULTADOS_PRUEBAS_V15_9.md).
+diff --git a/docs/historial/LEEME_V15_9_APERTURA_ROI_ZOOM_MATRIZ.md b/docs/historial/LEEME_V15_9_APERTURA_ROI_ZOOM_MATRIZ.md
+new file mode 100644
+index 0000000..6e5b2fb
+--- /dev/null
++++ b/docs/historial/LEEME_V15_9_APERTURA_ROI_ZOOM_MATRIZ.md
+@@ -0,0 +1,37 @@
++# LEEME V15.9 — Apertura, ROI, zoom y matriz (2026-10-12)
++
++Versión **15.9.0** sobre V15.8.1. Guía de uso completo:
++[LEEME_V15_9_APERTURA_ROI_ZOOM_MATRIZ.md](../guias/LEEME_V15_9_APERTURA_ROI_ZOOM_MATRIZ.md).
++
++## Cambios
++
++- **Rangos de apertura antes de procesar**: al pulsar «Procesar carpeta»
++  aparece el diálogo «Configurar rangos de apertura» (verde/amarillo, con
++  vista previa de la combinación) antes de cualquier trabajo. Predeterminados
++  6/7 ms; validación estricta; casilla opcional para guardar la preferencia;
++  instantánea por ejecución con origen trazable.
++- **Detector de dos momentos**: aparición corroborada + retroceso al primer
++  cambio conectado; puntuaciones separadas por fuente (fisura, tela clara,
++  abombamiento, reflejo, movimiento de cámara, ruido); estado
++  `evento_al_inicio` cuando la apertura está desde el primer cuadro (sin
++  inventar nacimiento) con `razones_evento` guardadas por video.
++- **ROI general y microzona distintas**: ROI manual bloqueada y persistente;
++  sugerencia automática sólo con confirmación explícita; aceptar/ajustar/
++  bloquear/revertir; una imagen pertenece a un solo visor.
++- **Zoom e inspección**: 100/200/400/800 % + ajuste a pantalla, rueda,
++  doble clic, pantalla completa, atajos `+`/`−`/`0`/`F`/`L` y lupa temporal
++  F−1/F/F+1 con el mismo punto espacial; overlays independientes.
++- **Matriz completa**: todas las posiciones esperadas (HT/RT/NT ×
++  UGL/OGL/NOM, cupos 5/10 con expansión), vacantes en gris tenue sin ID ni
++  tiempo, motivos de gris trazables, «Sin clasificar» con causa y enlace al
++  Listado; mismos rangos en dashboard y Excel.
++- **Consenso 3 de 4**: con 4 cámaras comparables, 3 coincidentes confirman;
++  menos respaldo queda «pendiente de revisión» con `tiempo_propuesto_ms` sin
++  aplicar; salidas separadas (primer instante por cámara + consolidado);
++  estados confirmado/propuesto/discordancia/sin_evento/sin_datos; la
++  confirmación humana tiene prioridad.
++
++## Documentación relacionada
++
++- [RESULTADOS_PRUEBAS_V15_9.md](../informes/RESULTADOS_PRUEBAS_V15_9.md).
++- [ACTUALIZACION_CARPETA_V15_9.md](../informes/ACTUALIZACION_CARPETA_V15_9.md).
+diff --git a/docs/historial/README_CORRECCIONES_VERSIONES.md b/docs/historial/README_CORRECCIONES_VERSIONES.md
+index b2c8732..a8d06f0 100644
+--- a/docs/historial/README_CORRECCIONES_VERSIONES.md
++++ b/docs/historial/README_CORRECCIONES_VERSIONES.md
+@@ -1,3 +1,22 @@
++## V15.9.0 — Apertura, ROI, zoom y matriz completa (2026-10-12)
++
++- Diálogo «Configurar rangos de apertura» al pulsar «Procesar carpeta», antes
++  de cualquier trabajo: predeterminados 6/7 ms, validación estricta, casilla
++  opcional «Guardar para próximas carpetas» y instantánea por ejecución.
++- Detector de dos momentos con puntuaciones separadas por fuente, estado
++  `evento_al_inicio` sin inventar tiempos y `razones_evento` guardadas.
++- ROI general y microzona de nacimiento distintas; ROI manual bloqueada y
++  persistente; sugerencia automática sólo con confirmación explícita.
++- Zoom del visor 100/200/400/800 %, rueda, doble clic, pantalla completa,
++  atajos +/−/0/F/L y lupa temporal F−1/F/F+1.
++- Matriz completa con posiciones vacantes en gris tenue, motivos de gris,
++  «Sin clasificar» con causa y cupos expansibles; mismos rangos en dashboard
++  y Excel.
++- Consenso de 3 de 4 cámaras con estados confirmado/propuesto/discordancia/
++  sin_evento/sin_datos, salidas por cámara y consolidado, y prioridad de la
++  confirmación humana.
++- Ver [LEEME_V15_9_APERTURA_ROI_ZOOM_MATRIZ.md](LEEME_V15_9_APERTURA_ROI_ZOOM_MATRIZ.md).
++
+ ## V15 — Videos de alta velocidad y tiempo de apertura de airbag (2026-10-05)
+ 
+ - Integra fotografías y videos en una misma ejecución mediante `Fotos + videos`, `Solo fotos` o `Solo videos`.
+@@ -332,4 +351,4 @@ Ver [LEEME_V11_ESTABILIDAD_EDITOR_EXCEL.md](LEEME_V11_ESTABILIDAD_EDITOR_EXCEL.m
+ - Sustituye la explicación larga visible por un icono `ⓘ` con ayuda contextual.
+ - La ayuda aclara: una sola línea entrena la zona unida; varias líneas intentan separarse por línea.
+ - No modifica la lógica de aprendizaje, persistencia, Excel ni entrenamiento de V14.12.
+-- Actualiza la versión de caché del frontend para que el cambio aparezca al reiniciar.
++- Actualiza la versión de caché del frontend para que el cambio aparezca al reiniciar.
+\ No newline at end of file
+diff --git a/docs/informes/ACTUALIZACION_CARPETA_V15_9.md b/docs/informes/ACTUALIZACION_CARPETA_V15_9.md
+new file mode 100644
+index 0000000..5737806
+--- /dev/null
++++ b/docs/informes/ACTUALIZACION_CARPETA_V15_9.md
+@@ -0,0 +1,54 @@
++# ACTUALIZACIÓN DE CARPETA V15.9 — qué cambia y cómo aplicarlo
++
++Versión objetivo: **15.9.0** sobre **V15.8.1**. Este informe es el documento
++de cambios de la entrega **V-Matrix OCR V15.9 (apertura · ROI · zoom ·
++matriz)**. El repositorio de GitHub es de sólo lectura: los cambios se
++entregan como archivos modificados completos + `cambios_V15_9.patch` dentro
++de un zip; no se hace push ni PR.
++
++## Archivos modificados/nuevos del motor
++
++| Archivo | Cambio |
++| --- | --- |
++| `utilidades/matriz_apertura.py` | Motor único del semáforo y de la matriz (columnas HT/RT/NT × UGL/OGL/NOM con cupos 5/10, vacantes, sin clasificar, `evaluar_apertura` con motivo). |
++| `criterios_usuario.py` | Preferencia de límites con historial; instantánea por ejecución (`guardar_instantanea_ejecucion`, `cargar_instantanea_ejecucion`) con origen `predeterminado`/`vigente`/`elegido`. |
++| `reporte_bmg.py` | Excel usa el mismo motor (`evaluar_apertura` compartido) y respeta la instantánea de la ejecución. |
++| `generar_excel.py` | Reexportación con criterios vigentes; sin cambios de identificadores 1ST/2ST. |
++| `pipeline.py` | Reanudación conserva la instantánea de criterios de la ejecución; `SolicitudPipeline` acepta `rango_apertura`. |
++| `dashboard/backend/app.py` | `/api/pipeline` acepta `rango_apertura` (valida ANTES de lanzar el hilo; 422 sin trabajo si es inválido), registra la instantánea, guarda preferencia sólo con casilla marcada; `/api/config` publica `criterios_predeterminados`, `criterios_vigentes` y `criterio_efectivo`; matriz completa en `/api/resumen`. |
++| `video_airbag.py` | Detector de dos momentos (aparición corroborada + retroceso al primer cambio conectado), `scores_fuentes` separados, baseline robusto, marca `evento_al_inicio` sin inventar tiempos, `razones_evento` guardadas, `consenso_videos` con `estado_consenso` 3-de-4 y salidas separadas (primer instante por cámara + consolidado). |
++| `aprendizaje_video_airbag.py` | Ranking de candidatos de ROI con score compuesto (intersección sobre unión + inliers + magnitud de cambio); **umbrales de aceptación intactos**; una imagen pertenece a un solo visor. |
++| `dashboard/frontend/app.js` | Diálogo «Configurar rangos de apertura» al procesar; MatrizApertura completa (vacantes, motivos, sin clasificar, cupos); zoom 100/200/400/800 + rueda/doble clic/fullscreen/teclado; lupa F−1/F/F+1; overlays ROI/Sugerida/Nacimiento independientes. |
++| `dashboard/frontend/estilos.css` | Estilos del diálogo, vacantes, inspector de zoom y lupa. |
++| `dashboard/frontend/i18n.js` | Traducciones EN/DE de los textos nuevos. |
++| `VERSION.txt` | 15.8.1 → 15.9.0. |
++
++## Cómo aplicar la actualización
++
++1. Respaldar la carpeta del proyecto (o trabajar en una rama local).
++2. Copiar los archivos del zip sobre el proyecto (vienen completos).
++3. Opcional: aplicar `cambios_V15_9.patch` con `git apply cambios_V15_9.patch`
++   si prefieres el diff sobre una copia limpia de V15.8.1.
++4. Ejecutar la batería: `python -m pytest pruebas/` y `node --test pruebas/*.cjs`.
++5. Reiniciar el dashboard para que el frontend recargue.
++
++## Garantías de la publicación (reglas del plan)
++
++- No se rompen revisiones ni reglas anteriores (la base V15.8.1 pasa igual).
++- **Nunca se inventan tiempos**: el gris queda sin `opening_time_ms`, el
++  estado `evento_al_inicio` queda sin `tiempo_ms` (sólo sospechoso) y el
++  consenso sin respaldo deja `tiempo_propuesto_ms` **sin aplicar**.
++- **No se alteran ROIs confirmadas por el usuario** (ROI manual bloqueada y
++  persistente; sugerencias sólo con confirmación explícita).
++- **No se sustituye una medición ausente por 0 ms**; 0 ms sólo se colorea si
++  el dato es real y confiable.
++- Identificadores **1ST/2ST** del Excel intactos.
++- Interfaz y etiquetas en **ES/EN/DE**; ejecución **local sin internet**.
++
++## Validaciones pendientes con datos reales
++
++Las aceptaciones que requieren videos/casos reales quedan pendientes (no hay
++datos de ensayo en el repositorio): exactitud ±1 cuadro sobre 30 casos,
++acuerdo ≥ 0.95 con revisión humana, umbral 3-de-4 con lote real de 4 cámaras
++y criterio de `reflejo` con reflejos reales. Detalle en
++[RESULTADOS_PRUEBAS_V15_9](RESULTADOS_PRUEBAS_V15_9.md).
+diff --git a/docs/informes/RESULTADOS_PRUEBAS_V15_9.md b/docs/informes/RESULTADOS_PRUEBAS_V15_9.md
+new file mode 100644
+index 0000000..10030c3
+--- /dev/null
++++ b/docs/informes/RESULTADOS_PRUEBAS_V15_9.md
+@@ -0,0 +1,81 @@
++# RESULTADOS DE PRUEBAS V15.9 — Apertura, ROI, zoom y matriz
++
++Versión: **15.9.0** · Base: **V15.8.1** · Rama local:
++`codex/ocr-v15-9-apertura-roi-zoom-matriz` (el repositorio de GitHub es de
++sólo lectura; la entrega es un parche local + zip).
++
++## Resumen de ejecución (entorno local de desarrollo)
++
++| Batería | Resultado |
++| --- | --- |
++| `python -m pytest pruebas/` | **462 aprobadas · 1 falla conocida** |
++| `node --test pruebas/*.cjs` (24 archivos) | **24/24 en verde** |
++
++La única falla es `test_dashboard.py::test_estado_config_y_frontend`, que
++exige datos procesados en la base del dashboard (`hay_datos`) y falla desde
++la línea base V15.8.1 en un entorno sin carpeta procesada. No está
++relacionada con V15.9 y no se modificó su contrato.
++
++Las pruebas nuevas de V15.9 son:
++
++- `pruebas/test_v15_9_criterios_ejecucion.py` (13): rangos confirmados antes
++  de procesar, predeterminados 6/7 ms, validación (finitos, no negativos,
++  `0 ≤ verde < amarillo`), instantánea por ejecución con origen, preferencia
++  guardada sólo con casilla marcada y rechazo del trabajo con rangos
++  inválidos.
++- `pruebas/test_v15_9_matriz_completa.py` (7): las 7 columnas con sus cupos
++  (5/10), vacantes sin ID ni tiempo, gris nunca es 0 ms, expansión de cupos,
++  «Sin clasificar» con causa y semáforo compartido con el Excel.
++- `pruebas/test_v15_9_detector_dos_momentos.py` (5): razones del evento
++  (dos momentos, fuentes separadas, reloj), `evento_al_inicio` sin inventar
++  tiempo, rechazo de flash global y de abombamiento.
++- `pruebas/test_v15_9_consenso_3_de_4.py` (9): 3-de-4 confirma, menos
++  respaldo queda propuesto/discordancia con tiempo propuesto (nunca
++  autoaplicado), cámaras raras/excluidas no destruyen el consenso,
++  confirmación humana manda y estados sin_evento/sin_datos/evento_al_inicio.
++- `pruebas/test_v15_9_apertura_zoom_ui.cjs` (4): el diálogo se abre ANTES de
++  procesar, envía `rango_apertura`, valida límites; zoom 100/200/400/800 con
++  rueda/doble clic/teclado, lupa F±1, overlays independientes; matriz con
++  vacantes y sin clasificar; i18n EN/DE del diálogo.
++
++## Cobertura de las fases
++
++- **Fase 0**: base de pruebas con `git worktree` de la versión previa; la
++  batería completa se corrió antes y después. Validación ±1 cuadro con datos
++  reales: **pendiente** (no hay videos de ensayo en el repositorio).
++- **Fase 0.5**: cubierta por `test_v15_9_criterios_ejecucion.py` +
++  contratos de `test_v15_9_apertura_zoom_ui.cjs`.
++- **Fase 1**: cubierta por `test_v15_9_detector_dos_momentos.py` y las
++  regresiones de `test_ruptura_real.py` (30 casos sintéticos de ruptura).
++- **Fase 2**: cubierta por las regresiones de aprendizaje
++  (`test_v15_7_bugs_prioritarios.py`, `test_v14_9_*`) que fijan los
++  umbrales de selección de zona y el bloqueo de ROI manual.
++- **Fase 3**: cubierta por `test_v15_9_apertura_zoom_ui.cjs`.
++- **Fase 4**: cubierta por `test_v15_9_matriz_completa.py` +
++  `test_matriz_apertura_dashboard_v7.py`.
++- **Fase 5**: cubierta por `test_v15_9_consenso_3_de_4.py` y las
++  regresiones de consenso de `test_v15_7_bugs_prioritarios.py` /
++  `test_v15_6_tiempo_video_estable.py` / `test_ruptura_real.py`.
++- **Fase 6**: verificación de `analisis_video.py` (legado): no duplica la
++  lógica del semáforo (sólo `utilidades/matriz_apertura.py` +
++  `criterios_usuario.py`). Cachés acotadas y con identidad de archivo:
++  `_CACHE_RELOJ_MAX = 4096` con desalojo, caché de video invalidada por
++  `ALGORITMO_VERSION` y `firma_video.firma_contenido` (identidad por bytes).
++
++## Contratos que no se rompieron
++
++- Identificadores del Excel (1ST/2ST) intactos.
++- Estados legados de consenso (`confirmado_manual`, `primera_aparicion`,
++  `sin_consenso`, `sin_datos`) intactos; `estado_consenso` es un campo nuevo.
++- La confirmación humana nunca se reemplaza por un consenso automático.
++- Nunca se inventan tiempos: el gris queda sin `opening_time_ms` y el estado
++  `evento_al_inicio` queda sin `tiempo_ms` (sólo `tiempo_ms_sospechoso`).
++- Interfaz local, sin internet; ES/EN/DE conservados y ampliados.
++
++## Pendientes con datos reales (aceptación futura)
++
++1. Exactitud de ±1 cuadro contra cronómetro de referencia (30 videos).
++2. Acuerdo ≥ 0.95 con la revisión humana de 30 casos reales.
++3. Umbral de consenso 3-de-4 con un lote real de 4 cámaras.
++4. Criterio de definición de `reflejo` con reflejos reales (los límites de
++   medición no se tocaron).
+diff --git a/generar_excel.py b/generar_excel.py
+index 258063b..a7309c5 100644
+--- a/generar_excel.py
++++ b/generar_excel.py
+@@ -192,10 +192,18 @@ def generar_excel(ruta_validacion: str | Path | None = None,
+                   reglas: dict | None = None,
+                   ruta_plantilla: str | Path | None = None,
+                   datos_validacion: dict | None = None,
+-                  idioma: str = "es") -> Path:
+-    """Genera resultado_maestro.xlsx. Retorna la ruta del archivo creado."""
++                  idioma: str = "es",
++                  criterios_apertura: dict | None = None) -> Path:
++    """Genera resultado_maestro.xlsx. Retorna la ruta del archivo creado.
++
++    ``criterios_apertura`` (V15.9): instantánea ``{"verde_max", "amarillo_max",
++    "origen"}`` de la ejecución; el reporte BMG la usa para que el semáforo del
++    libro coincida con el mostrado durante esa ejecución.
++    """
+     config = config or cargar_config()
+     reglas = reglas or cargar_reglas()
++    if criterios_apertura is None and isinstance(datos_validacion, dict):
++        criterios_apertura = datos_validacion.get("criterios_apertura_ejecucion")
+     f3 = config.get("fase3", {})
+     ruta_validacion = Path(ruta_validacion) if ruta_validacion else RAIZ_PROYECTO / "validacion_resultados.json"
+     ruta_salida = Path(ruta_salida) if ruta_salida else RAIZ_PROYECTO / f3.get("archivo_salida", "resultado_maestro.xlsx")
+@@ -242,7 +250,8 @@ def generar_excel(ruta_validacion: str | Path | None = None,
+             plantilla_bmg = RAIZ_PROYECTO / plantilla_bmg
+         if plantilla_bmg.is_file():
+             return generar_reporte_bmg(
+-                plantilla_bmg, ruta_salida, datos.get("resultados", []), config, reglas, idioma=idioma)
++                plantilla_bmg, ruta_salida, datos.get("resultados", []), config, reglas, idioma=idioma,
++                criterios_apertura=criterios_apertura)
+ 
+     try:
+         from pruebas_externas import cargar as cargar_externas
+diff --git a/pipeline.py b/pipeline.py
+index a10a6a1..b9a6bd1 100644
+--- a/pipeline.py
++++ b/pipeline.py
+@@ -82,7 +82,8 @@ def ejecutar_pipeline(ruta_raiz: str | Path, config: dict | None = None,
+                       idiomas_exportacion: list[str] | None = None,
+                       ejecucion_id: str | None = None,
+                       perfil_rendimiento: str | None = None,
+-                      contenido: str = "todo") -> dict:
++                      contenido: str = "todo",
++                      criterios_apertura: dict | None = None) -> dict:
+     """Corre las Fases 0-3 y retorna un dict con artefactos y resumen por fase."""
+     config = deepcopy(config or cargar_config())
+     from gestor_recursos import normalizar_perfil, obtener_gestor_recursos
+@@ -339,6 +340,12 @@ def ejecutar_pipeline(ruta_raiz: str | Path, config: dict | None = None,
+     extras_excel = ({"datos_validacion": validacion}
+                     if "datos_validacion" in firma_excel else {})
+     soporta_idioma = "idioma" in firma_excel
++    # V15.9: la instantánea de rangos de la ejecución viaja con los datos y
++    # colorea el Excel igual que la matriz mostrada durante el procesamiento.
++    if criterios_apertura:
++        validacion["criterios_apertura_ejecucion"] = dict(criterios_apertura)
++        if "criterios_apertura" in firma_excel:
++            extras_excel["criterios_apertura"] = dict(criterios_apertura)
+     archivos_excel: dict[str, str] = {}
+     # `validacion` no se modifica entre idiomas: las tres salidas nacen de una
+     # única instantánea posterior al OCR y a las correcciones vigentes.
+diff --git a/pruebas/test_v15_9_apertura_zoom_ui.cjs b/pruebas/test_v15_9_apertura_zoom_ui.cjs
+new file mode 100644
+index 0000000..a8e3a5a
+--- /dev/null
++++ b/pruebas/test_v15_9_apertura_zoom_ui.cjs
+@@ -0,0 +1,115 @@
++/** V15.9 · contratos de interfaz: rangos previos a procesar, zoom/lupa y matriz completa. */
++const test = require("node:test");
++const assert = require("node:assert/strict");
++const fs = require("node:fs");
++const path = require("node:path");
++
++const raiz = path.resolve(__dirname, "..");
++const app = fs.readFileSync(path.join(raiz, "dashboard", "frontend", "app.js"), "utf8");
++const css = fs.readFileSync(path.join(raiz, "dashboard", "frontend", "estilos.css"), "utf8");
++const i18n = fs.readFileSync(path.join(raiz, "dashboard", "frontend", "i18n.js"), "utf8");
++
++test("diálogo de rangos se abre ANTES de procesar y valida límites", () => {
++  for (const cadena of [
++    "Configurar rangos de apertura", "Verde hasta (ms)", "Amarillo hasta (ms)",
++    "Procesar con estos rangos", "Usar predeterminados (6 / 7 ms)",
++    "Guardar para próximas carpetas", "Cancelar",
++    "0 ≤ verde < amarillo", "Escribe dos números finitos",
++    "Los límites no pueden ser negativos.", "Combinación definitiva:",
++    "dialogo-rangos-vista-previa", "Vista previa del semáforo",
++    "dialogoRangos", "confirmarProcesamiento", "rango_apertura",
++    "verde_max: rango.verde_max, amarillo_max: rango.amarillo_max",
++    "origen: rango.origen, guardar_preferencia: !!rango.guardar_preferencia",
++  ]) {
++    assert.ok(app.includes(cadena), `Falta en app.js: ${cadena}`);
++  }
++  // «Procesar carpeta» abre el diálogo primero; el trabajo empieza sólo al confirmar.
++  const iProcesar = app.indexOf("const procesar = async (ev) => {");
++  assert.ok(iProcesar >= 0, "Falta VistaCarga.procesar");
++  const cuerpo = app.slice(iProcesar, app.indexOf("const confirmarProcesamiento", iProcesar));
++  assert.ok(cuerpo.includes("setDialogoRangos(true)"), "procesar() debe abrir el diálogo");
++  assert.ok(!cuerpo.includes("/api/pipeline"), "procesar() no debe iniciar el pipeline por sí solo");
++  const iConfirmar = app.indexOf("const confirmarProcesamiento", iProcesar);
++  const confirmar = app.slice(iConfirmar, iConfirmar + 1600);
++  assert.ok(confirmar.includes("/api/pipeline"), "confirmarProcesamiento envía el pipeline");
++  assert.ok(confirmar.includes("rango_apertura"), "confirmarProcesamiento envía rango_apertura");
++  // El diálogo valida la combinación antes de habilitar «Procesar con estos rangos».
++  const iDialogo = app.indexOf("function DialogoRangosApertura");
++  assert.ok(iDialogo > 0, "Falta DialogoRangosApertura");
++  const dialogo = app.slice(iDialogo, iDialogo + 6400);
++  assert.ok(dialogo.includes("validar(vRaw, aRaw)"), "El diálogo valida los límites");
++  assert.ok(dialogo.includes("procesarConCampos(\"elegido\")"), "Acción con rangos elegidos");
++  assert.ok(dialogo.includes("procesarConCampos(\"predeterminado\")"), "Acción con predeterminados");
++  assert.ok(dialogo.includes("guardar_preferencia"), "El diálogo envía guardar_preferencia");
++  assert.ok(dialogo.includes("checked=${guardarPreferencia}"), "El checkbox parte sin marcar");
++  for (const clase of ["dialogo-rangos", "dialogo-rangos-campos",
++                       "dialogo-rangos-guardar", "dialogo-rangos-acciones"]) {
++    assert.ok(css.includes(clase), `Falta estilo: ${clase}`);
++  }
++});
++
++test("zoom del video: 100/200/400/800, rueda, doble clic, fullscreen y lupa F±1", () => {
++  for (const cadena of [
++    "video-inspector-barra", "video-inspector-marco", "video-inspector-overlays",
++    "video-lupa-temporal", "video-lupa-panel", "Ajustar a pantalla", "Lupa F±1",
++    "PASOS_ZOOM", "zoomInspector", "zoomPaso", "ruedaZoomInspector",
++    "dobleClicZoom", "pantallaCompleta", "setLupaActiva",
++    "Lupa temporal F-1/F/F+1 (tecla L)",
++  ]) {
++    assert.ok(app.includes(cadena), `Falta en app.js: ${cadena}`);
++  }
++  // El marco usa la rueda y la imagen el doble clic; el teclado tiene +/−/0/F/L.
++  assert.ok(app.includes("onWheel=${ruedaZoomInspector}"), "Falta zoom con rueda");
++  assert.ok(app.includes("onDblClick=${dobleClicZoom}"), "Falta zoom con doble clic");
++  const iTeclas = app.indexOf("function tecladoVideo(e) {");
++  assert.ok(iTeclas >= 0, "Falta tecladoVideo");
++  const teclas = app.slice(iTeclas, iTeclas + 1400);
++  for (const t of ["zoomPaso(1)", "zoomPaso(-1)", "setZoomInspector(100)",
++                   "pantallaCompleta()", "setLupaActiva((v) => !v)"]) {
++    assert.ok(teclas.includes(t), `Atajo faltante en tecladoVideo: ${t}`);
++  }
++  // Overlays independientes (ROI / sugerida / nacimiento) y lupa de F-1,F,F+1.
++  for (const t of ["overlayRoi", "overlaySugerida", "overlayNacimiento",
++                   "F (actual)", "F−1", "F+1",
++                   "Mismo punto espacial en los tres cuadros"]) {
++    assert.ok(app.includes(t), `Falta en app.js: ${t}`);
++  }
++  for (const clase of ["video-inspector-barra", "video-inspector-marco",
++                       "video-lupa-temporal", "video-lupa-panel", "boton-compacto"]) {
++    assert.ok(css.includes(clase), `Falta estilo: ${clase}`);
++  }
++});
++
++test("matriz completa: vacantes, sin clasificar y cupos", () => {
++  for (const cadena of [
++    "matriz-celda-vacante", "Vacante (posición sin caso)",
++    "matriz-sin-clasificar", "matriz-columna-cupos", "matriz-celda-fuera",
++    "Sin clasificar (", "sin_clasificar",
++    "Todas las posiciones esperadas se muestran",
++    "esperados", "Posición esperada sin caso asignado",
++    "motivo_estado", "abrir en Listado",
++  ]) {
++    assert.ok(app.includes(cadena), `Falta en app.js: ${cadena}`);
++  }
++  // El gris de caso y el gris de vacante se distinguen por clase y leyenda.
++  const iMatriz = app.indexOf("function MatrizApertura(");
++  const matriz = app.slice(iMatriz, iMatriz + 5200);
++  assert.ok(matriz.includes("matriz-celda-vacia"), "Se conserva la celda vacía legada");
++  assert.ok(matriz.includes("paleta.vacante"), "La vacante tiene color propio");
++  assert.ok(matriz.includes("item.tipo === \"vacante\""), "Las vacantes se renderizan aparte");
++});
++
++test("i18n del diálogo de rangos en inglés y alemán", () => {
++  for (const cadena of [
++    "Configure opening ranges", "Process with these ranges", "Use defaults (6 / 7 ms)",
++    "Save for next folders (permanent preference)", "Vacant (position without case)",
++    "Öffnungsbereiche konfigurieren", "Mit diesen Bereichen verarbeiten",
++    "Standardwerte verwenden (6 / 7 ms)", "Für nächste Ordner speichern",
++    "Frei (Position ohne Fall)",
++  ]) {
++    assert.ok(i18n.includes(cadena), `Falta traducción: ${cadena}`);
++  }
++  // Las claves V15.8 siguen publicadas.
++  assert.ok(i18n.includes("Save selected thresholds"));
++  assert.ok(i18n.includes("Gewählte Grenzwerte speichern"));
++});
+diff --git a/pruebas/test_v15_9_consenso_3_de_4.py b/pruebas/test_v15_9_consenso_3_de_4.py
+new file mode 100644
+index 0000000..d515ac9
+--- /dev/null
++++ b/pruebas/test_v15_9_consenso_3_de_4.py
+@@ -0,0 +1,154 @@
++"""V15.9 · Fase 5: consenso de 3 de 4 cámaras (o del pool disponible).
++
++Salida doble (primer instante confiable por cámara + resultado consolidado),
++estados confirmado/propuesto/discordancia/sin_evento/sin_datos y nunca
++reemplazo de una confirmación humana.
++"""
++import video_airbag as va
++
++
++def _item(nombre, tiempo, *, estado="candidato", revision=None, inicio=False,
++          advertencia=None):
++    it = {
++        "nombre": nombre, "estado": estado, "tiempo_ms": tiempo,
++        "tiempo_fps_ms": tiempo, "resolucion_nativa_ms": 0.1,
++        "precision_fuente_ms": 0.1, "fuente_tiempo": "fps_subframe",
++    }
++    if revision:
++        it["revision_manual"] = revision
++    if inicio:
++        it["estado"] = "evento_al_inicio"
++        it["evento_al_inicio"] = True
++        it["tiempo_ms"] = None
++        it["tiempo_ms_sospechoso"] = tiempo
++    if advertencia:
++        it["advertencia_fps"] = advertencia
++    return it
++
++
++CAM = {"a": "09_DETAIL.AVI", "b": "09_FRONTAL.AVI", "c": "09_LATERAL.AVI",
++       "d": "09_INNEN.AVI", "s": "09_SCHEIBE.AVI", "r": "05_DETAIL.AVI"}
++
++
++def test_tres_de_cuatro_coinciden_confirma():
++    items = [_item(CAM["a"], 5000.0), _item(CAM["b"], 5000.05),
++             _item(CAM["c"], 5000.1), _item(CAM["d"], None, estado="no_event")]
++    res = va.consenso_videos(items, {})
++    assert res["soporte"] == 3 and res["soporte_requerido"] == 3
++    assert res["estado"] == "primera_aparicion"
++    assert res["estado_consenso"] == "confirmado"
++    assert res["requiere_revision"] is False
++    assert res["apertura_revelada"] is True
++    assert res["tiempo_ms"] == 5000.0
++    # Salida 1: primer instante confiable por cámara.
++    por_camara = {p["video"]: p for p in res["primer_instante_por_camara"]}
++    assert len(por_camara) == 4
++    assert por_camara[CAM["a"]]["tiempo_ms"] == 5000.0
++    assert por_camara[CAM["a"]]["en_consenso"] is True
++    assert por_camara[CAM["a"]]["estado"] == "confirmado"
++    assert por_camara[CAM["d"]]["en_consenso"] is False
++    assert por_camara[CAM["d"]]["estado"] == "sin_evento"
++    assert por_camara[CAM["d"]]["tiempo_ms"] is None
++    # Salida 2: resultado consolidado del caso (clave = cámara, no el archivo).
++    assert res["valores_por_camara"]["DETAIL"] == 5000.0
++
++
++def test_dos_de_cuatro_queda_discordancia_y_pide_revision():
++    items = [_item(CAM["a"], 5000.0), _item(CAM["b"], 5000.1),
++             _item(CAM["c"], 8000.0), _item(CAM["d"], 8000.05)]
++    res = va.consenso_videos(items, {})
++    assert res["soporte_requerido"] == 3
++    assert res["estado"] == "sin_consenso"
++    assert res["estado_consenso"] == "discordancia"
++    assert res["requiere_revision"] is True
++    assert res["apertura_revelada"] is True
++    assert res["tiempo_propuesto_ms"] == 5000.0
++    assert any("no coinciden" in m for m in res["motivo_revision"])
++
++
++def test_unico_cluster_sin_soporte_queda_propuesto():
++    items = [_item(CAM["a"], 5000.0), _item(CAM["b"], None, estado="no_event"),
++             _item(CAM["c"], None, estado="no_event"), _item(CAM["d"], None, estado="no_event")]
++    res = va.consenso_videos(items, {})
++    assert res["soporte_requerido"] == 3
++    assert res["estado_consenso"] == "propuesto"
++    assert res["requiere_revision"] is True
++    assert res["tiempo_propuesto_ms"] == 5000.0
++    assert res["apertura_revelada"] is True
++
++
++def test_camaras_adicionales_raras_no_destruyen_el_consenso():
++    items = [_item(CAM["a"], 5000.0), _item(CAM["b"], 5000.05), _item(CAM["c"], 5000.1),
++             _item(CAM["s"], 2.0), _item(CAM["r"], 20000.0)]
++    res = va.consenso_videos(items, {})
++    assert res["soporte_requerido"] == 3
++    assert res["soporte"] == 3
++    assert res["estado"] == "primera_aparicion"
++    assert res["estado_consenso"] == "confirmado"
++    assert res["requiere_revision"] is False
++    assert "SCHEIBE" in res["camaras_excluidas"]
++
++
++def test_camara_ausente_no_cambia_el_minimo_de_tres():
++    items = [_item(CAM["a"], 5000.0), _item(CAM["b"], 5000.05), _item(CAM["c"], 5000.1)]
++    res = va.consenso_videos(items, {})
++    assert res["soporte_requerido"] == 2  # sólo 3 comparables disponibles
++    assert res["estado_consenso"] == "confirmado"  # 3 coinciden
++    assert res["requiere_revision"] is False
++    assert len(res["primer_instante_por_camara"]) == 3
++
++
++def test_confirmacion_humana_conserva_la_decision():
++    items = [_item(CAM["a"], 5000.0,
++                   revision={"estado": "confirmado", "frame_index": 25, "tiempo_ms": 5000.0}),
++             _item(CAM["b"], 8000.0), _item(CAM["c"], 8000.05), _item(CAM["d"], 8000.1)]
++    res = va.consenso_videos(items, {})
++    assert res["estado"] == "confirmado_manual"
++    assert res["tiempo_ms"] == 5000.0
++    assert res["requiere_revision"] is False
++    assert res["estado_consenso"] == "confirmado"
++    assert res["apertura_revelada"] is True
++    assert any(p["estado"] == "confirmado_manual"
++               for p in res["primer_instante_por_camara"])
++
++
++def test_estados_sin_evento_sin_datos_y_evento_al_inicio():
++    items = [_item(CAM["a"], None, estado="no_event"), _item(CAM["b"], None, estado="no_event"),
++             _item(CAM["c"], None, estado="no_event"), _item(CAM["d"], None, estado="no_event")]
++    res = va.consenso_videos(items, {})
++    assert res["estado_consenso"] == "sin_evento"
++    assert res["apertura_revelada"] is False
++    assert res["tiempo_ms"] is None
++    assert all(p["estado"] == "sin_evento" for p in res["primer_instante_por_camara"])
++    # Sin ningún item: sin_datos.
++    res2 = va.consenso_videos([], {})
++    assert res2["estado_consenso"] == "sin_datos"
++    # Evento al inicio: cada cámara conserva su estado y no se inventa tiempo.
++    items3 = [_item(CAM["a"], 5000.0, inicio=True), _item(CAM["b"], 5000.0, inicio=True),
++              _item(CAM["c"], 5000.0, inicio=True)]
++    res3 = va.consenso_videos(items3, {})
++    assert res3["tiempo_ms"] is None
++    assert res3["apertura_revelada"] is False
++    assert all(p["estado"] == "evento_al_inicio"
++               for p in res3["primer_instante_por_camara"])
++    assert all(p["tiempo_ms_sospechoso"] == 5000.0
++               for p in res3["primer_instante_por_camara"])
++
++
++def test_incidencias_de_video_se_reportan():
++    items = [_item(CAM["a"], 5000.0, advertencia="Se usaron 12 fps declarados."),
++             _item(CAM["b"], 5000.05), _item(CAM["c"], 5000.1)]
++    res = va.consenso_videos(items, {})
++    assert res["estado_consenso"] == "confirmado"
++    assert any("12 fps declarados" in i["detalle"] for i in res["incidencias"])
++    assert res["incidencias"][0]["video"] == CAM["a"]
++
++
++def test_deteccion_anterior_sin_respaldo_sigue_pidiendo_revision():
++    items = [_item(CAM["a"], 100.0), _item(CAM["b"], 5000.0),
++             _item(CAM["c"], 5000.05), _item(CAM["d"], 5000.1)]
++    res = va.consenso_videos(items, {})
++    assert res["camara_anterior_sin_respaldo"]["video"] == CAM["a"]
++    assert res["requiere_revision"] is True
++    assert res["tiempo_ms"] == 5000.0
++    assert any("sin respaldo" in m for m in res["motivo_revision"])
+diff --git a/pruebas/test_v15_9_criterios_ejecucion.py b/pruebas/test_v15_9_criterios_ejecucion.py
+new file mode 100644
+index 0000000..f63b08a
+--- /dev/null
++++ b/pruebas/test_v15_9_criterios_ejecucion.py
+@@ -0,0 +1,164 @@
++"""V15.9 · Fase 0.5: rangos confirmados antes de «Procesar carpeta».
++
++Cubre los valores predeterminados 6/7 ms, la validación (finitos, no
++negativos, 0 ≤ verde < amarillo), la instantánea por ejecución con su origen
++y el respeto del historial de preferencias del usuario.
++"""
++from copy import deepcopy
++import json
++
++from fastapi.testclient import TestClient
++import pytest
++
++import configuracion
++import criterios_usuario as criterios
++from utilidades.matriz_apertura import (
++    AMARILLO_PREDETERMINADO_MS,
++    VERDE_PREDETERMINADO_MS,
++    criterio_apertura_efectivo,
++    limites_predefinidos,
++)
++
++
++@pytest.fixture
++def aislado(tmp_path, monkeypatch):
++    monkeypatch.setattr(criterios, "RUTA_CRITERIOS", tmp_path / "criterios.json")
++    monkeypatch.setattr(criterios, "RUTA_INSTANTANEAS", tmp_path / "instantaneas")
++    return tmp_path
++
++
++def test_predeterminados_son_6_y_7(aislado):
++    assert limites_predefinidos() == (6.0, 7.0)
++    assert (VERDE_PREDETERMINADO_MS, AMARILLO_PREDETERMINADO_MS) == (6.0, 7.0)
++    vigentes = criterios.criterios_o_predeterminados()
++    assert vigentes["verde_max"] == 6.0
++    assert vigentes["amarillo_max"] == 7.0
++    assert vigentes["origen"] == "predeterminado"
++
++
++def test_origen_vigente_cuando_hay_preferencia(aislado):
++    criterios.guardar_criterios_apertura(5.5, 6.5, "revisor")
++    vigentes = criterios.criterios_o_predeterminados()
++    assert vigentes["verde_max"] == 5.5
++    assert vigentes["origen"] == "vigente"
++
++
++def test_instantanea_por_ejecucion_no_toca_la_preferencia(aislado):
++    criterios.guardar_criterios_apertura(5.0, 6.0, "revisor")
++    inst = criterios.guardar_instantanea_ejecucion(
++        "ejecucion-1", verde_max=4.0, amarillo_max=5.0, origen="elegido", usuario="operador")
++    assert inst["origen"] == "elegido"
++    # La preferencia global conserva 5/6; la instantánea sólo explica el lote.
++    assert criterios.cargar_criterios_usuario()["verde_max"] == 5.0
++    cargada = criterios.cargar_instantanea_ejecucion("ejecucion-1")
++    assert cargada["verde_max"] == 4.0
++    assert cargada["amarillo_max"] == 5.0
++    # La instantánea se reutiliza al reanudar el mismo ejecucion_id.
++    otra = criterios.guardar_instantanea_ejecucion(
++        "ejecucion-1", verde_max=9.0, amarillo_max=10.0, origen="elegido")
++    assert otra["verde_max"] == 9.0
++    assert criterios.cargar_instantanea_ejecucion("ejecucion-1")["verde_max"] == 9.0
++
++
++@pytest.mark.parametrize("v,a", [(5, 5), (6, 4), (-1, 3), (0, -2),
++                                 (float("nan"), 3), (2, float("inf")),
++                                 (True, 3), ("2", 3)])
++def test_instantanea_rechaza_limites_invalidos(aislado, v, a):
++    with pytest.raises(ValueError):
++        criterios.guardar_instantanea_ejecucion(
++            "e", verde_max=v, amarillo_max=a, origen="elegido")
++    assert criterios.cargar_instantanea_ejecucion("e") is None
++
++
++def test_instantanea_rechaza_origen_y_ids_invalidos(aislado):
++    with pytest.raises(ValueError):
++        criterios.guardar_instantanea_ejecucion(
++            "e", verde_max=1, amarillo_max=2, origen="inventado")
++    with pytest.raises(ValueError):
++        criterios.guardar_instantanea_ejecucion(
++            "../escape", verde_max=1, amarillo_max=2, origen="elegido")
++    assert criterios.cargar_instantanea_ejecucion("../escape") is None
++
++
++def test_criterio_efectivo_prefiere_instantanea_y_declara_origen(aislado):
++    criterios.guardar_criterios_apertura(8.0, 9.0, "revisor")
++    inst = criterios.guardar_instantanea_ejecucion(
++        "ejecucion-2", verde_max=4.0, amarillo_max=5.0, origen="elegido")
++    criterio, origen = criterio_apertura_efectivo(
++        None, criterios.cargar_criterios_usuario(), inst)
++    assert origen == "instantanea_ejecucion"
++    assert criterio == {"verde": "<= 4", "amarillo": "4-5", "rojo": "> 5"}
++    # Sin instantánea manda la preferencia del usuario.
++    criterio2, origen2 = criterio_apertura_efectivo(
++        None, criterios.cargar_criterios_usuario(), None)
++    assert origen2 == "criterios_usuario"
++    assert criterio2["rojo"] == "> 9"
++
++
++@pytest.fixture
++def api(aislado, monkeypatch):
++    import dashboard.backend.app as backend
++    monkeypatch.setattr(backend, "REGLAS", deepcopy(configuracion.cargar_reglas()))
++    monkeypatch.setattr(backend, "_pipeline_estado", {"estado": "completado"})
++    monkeypatch.setattr(backend, "_video_reanalisis_hilo", None)
++    return TestClient(backend.app), backend
++
++
++def _solicitud_base():
++    return {"ruta": ".", "modo_ejecucion": "completo"}
++
++
++def test_api_pipeline_rechaza_limites_invalidos_antes_de_trabajar(api, aislado, monkeypatch):
++    cliente, backend = api
++    ejecutado = []
++    monkeypatch.setattr(backend, "_pipeline_hilo", None)
++    monkeypatch.setattr(backend.threading, "Thread",
++                        lambda **kw: ejecutado.append(kw) or type("H", (), {"start": lambda self: None, "is_alive": lambda self: False})())
++    monkeypatch.setattr(backend, "_capacidad_pipeline", lambda: {"listo": True})
++    cuerpo = _solicitud_base()
++    cuerpo["rango_apertura"] = {"verde_max": 9, "amarillo_max": 8}
++    r = cliente.post("/api/pipeline", json=cuerpo)
++    assert r.status_code == 422
++    assert not ejecutado, "No debe iniciarse ningún trabajo con rangos inválidos"
++    assert not (aislado / "instantaneas").exists() or not any(
++        (aislado / "instantaneas").glob("*.json"))
++
++
++def test_api_pipeline_registra_instantanea_y_puede_guardar_preferencia(api, aislado, monkeypatch):
++    cliente, backend = api
++    monkeypatch.setattr(backend, "_pipeline_hilo", None)
++    monkeypatch.setattr(backend.threading, "Thread",
++                        lambda **kw: type("H", (), {"start": lambda self: None, "is_alive": lambda self: False})())
++    monkeypatch.setattr(backend, "_capacidad_pipeline", lambda: {"listo": True})
++    monkeypatch.setattr(backend, "_persistir_checkpoint_pipeline", lambda: None)
++    cuerpo = _solicitud_base()
++    cuerpo["ruta"] = str(aislado)
++    cuerpo["ejecucion_id"] = "ejec-dialogo-1"
++    cuerpo["rango_apertura"] = {"verde_max": 5.5, "amarillo_max": 6.5,
++                                "origen": "elegido", "guardar_preferencia": False,
++                                "usuario": "operador"}
++    r = cliente.post("/api/pipeline", json=cuerpo)
++    assert r.status_code == 202
++    assert r.json()["criterios_apertura"]["verde_max"] == 5.5
++    inst = criterios.cargar_instantanea_ejecucion("ejec-dialogo-1")
++    assert inst["verde_max"] == 5.5 and inst["origen"] == "elegido"
++    # Sin guardar preferencia, el usuario conserva sus valores anteriores (ninguno).
++    assert criterios.cargar_criterios_usuario() is None
++
++    # Con guardar_preferencia explícito sí se persiste la preferencia.
++    cuerpo["ejecucion_id"] = "ejec-dialogo-2"
++    cuerpo["rango_apertura"] = {"verde_max": 3.5, "amarillo_max": 4.5,
++                                "origen": "elegido", "guardar_preferencia": True,
++                                "usuario": "operador"}
++    r = cliente.post("/api/pipeline", json=cuerpo)
++    assert r.status_code == 202
++    assert criterios.cargar_criterios_usuario()["verde_max"] == 3.5
++    assert len(json.loads((aislado / "criterios.json").read_text())["historial"]) == 0
++
++
++def test_config_publica_predeterminados_y_vigentes(api, aislado):
++    cliente, _ = api
++    datos = cliente.get("/api/config").json()
++    assert datos["criterios_predeterminados"] == {"verde_max": 6.0, "amarillo_max": 7.0}
++    assert datos["criterios_vigentes"]["origen"] in {"predeterminado", "vigente"}
++    assert "criterio_efectivo" in datos
+diff --git a/pruebas/test_v15_9_detector_dos_momentos.py b/pruebas/test_v15_9_detector_dos_momentos.py
+new file mode 100644
+index 0000000..2216f88
+--- /dev/null
++++ b/pruebas/test_v15_9_detector_dos_momentos.py
+@@ -0,0 +1,91 @@
++"""V15.9 · Fase 1: detector de dos momentos y evidencia explicable.
++
++El detector retrocede desde la aparición corroborada hasta el primer cambio
++conectado y guarda las razones del evento (dos momentos, ROI/microzona,
++puntuaciones separadas por fuente y reloj). Si la apertura ya está presente en
++el primer cuadro se marca ``evento_al_inicio`` sin inventar un nacimiento.
++"""
++import numpy as np
++import pytest
++
++from test_ruptura_real import _analizar, _fotogramas, _ruptura
++
++
++def test_razones_evento_explica_dos_momentos_y_fuentes(monkeypatch, tmp_path):
++    frames = _fotogramas()
++    _ruptura(frames, inicio=6)
++    r = _analizar(monkeypatch, tmp_path, frames)
++    assert r["estado"] == "candidato"
++    assert r["frame_evento"] == 6
++    raz = r["razones_evento"]
++    # Dos momentos: primer indicio y confirmación, con retroceso declarado.
++    assert raz["frame_inicio"] == 6
++    assert raz["frame_confirmacion"] >= 6
++    assert raz["definicion"]
++    # Puntuaciones separadas por fuente (fisura / tela / abombamiento / reflejo…).
++    scores = raz["scores_fuentes"]
++    for fuente in ("fisura", "tela_clara", "abombamiento", "reflejo",
++                   "movimiento_camara_px", "iluminacion_global",
++                   "ruido_compresion", "bordes_nuevos"):
++        assert fuente in scores
++    # Descartes y reloj trazables.
++    assert {"iluminacion_global", "abombamiento", "reflejo",
++            "movimiento_camara_px", "ruido_compresion"} <= set(raz["descartes"])
++    assert raz["reloj"]["fps"] == 5000.0
++    assert raz["reloj"]["resolucion_nativa_ms"] == pytest.approx(0.2)
++    assert raz["calidad"]["evento_al_inicio"] is False
++    # ROI/microzona se reportan (aunque sea sin aprendizaje previo).
++    assert "roi_deteccion" in raz
++    assert "microzona_bbox_norm" in raz
++    assert r["estado_evento"] in {"confirmado", "propuesto"}
++
++
++def test_evento_al_inicio_marca_y_no_inventa_tiempo(monkeypatch, tmp_path):
++    frames = _fotogramas()
++    _ruptura(frames, inicio=0)   # la apertura ya está desde el primer cuadro
++    r = _analizar(monkeypatch, tmp_path, frames)
++    assert r["estado"] == "evento_al_inicio"
++    assert r["estado_evento"] == "evento_al_inicio"
++    assert r["evento_al_inicio"] is True
++    # Nunca se afirma el nacimiento exacto ni se inventa un tiempo.
++    assert r["tiempo_ms"] is None
++    assert r["frame_evento_confiable"] is False
++    assert r["confianza"] <= 0.5
++    # El primer indicio visible se conserva (frame 0) con su tiempo sospechoso.
++    assert r["frame_evento"] == 0
++    assert r["tiempo_ms_sospechoso"] == 0.0
++    assert r["razones_evento"]["calidad"]["evento_al_inicio"] is True
++    assert r["evidencia_baseline"]
++
++
++def test_flash_global_no_es_apertura(monkeypatch, tmp_path):
++    frames = _fotogramas()
++    for i in range(8, len(frames)):
++        frames[i][:] = 220          # cambio global de iluminación, sin ruptura local
++    r = _analizar(monkeypatch, tmp_path, frames)
++    assert r["estado"] != "candidato"
++    assert r.get("tiempo_ms") is None
++
++
++def test_hinchado_suave_tampoco_es_apertura(monkeypatch, tmp_path):
++    # Compatibilidad con la definición de evento: abombamiento ≠ ruptura.
++    import cv2
++    frames = _fotogramas()
++    yy, xx = np.mgrid[:96, :128]
++    bulto = np.exp(-(((xx - 64) / 22) ** 2 + ((yy - 48) / 16) ** 2))
++    for i in range(4, len(frames)):
++        gris = np.clip(100 + min(90, 8 * (i - 3)) * bulto, 0, 255).astype(np.uint8)
++        frames[i] = cv2.cvtColor(gris, cv2.COLOR_GRAY2BGR)
++    r = _analizar(monkeypatch, tmp_path, frames)
++    assert r["estado"] == "sin_evento"
++    assert r.get("tiempo_ms") is None
++
++
++def test_version_de_algoritmo_y_dos_momentos_en_resultado(monkeypatch, tmp_path):
++    frames = _fotogramas()
++    _ruptura(frames, inicio=6)
++    r = _analizar(monkeypatch, tmp_path, frames)
++    assert r["algoritmo_video"].startswith("v15.9")
++    assert r["requiere_revision"] is True
++    assert r["validado_con_videos_reales"] is False
++    assert "no abombamiento" in r["definicion_evento"]
+diff --git a/pruebas/test_v15_9_matriz_completa.py b/pruebas/test_v15_9_matriz_completa.py
+new file mode 100644
+index 0000000..d059872
+--- /dev/null
++++ b/pruebas/test_v15_9_matriz_completa.py
+@@ -0,0 +1,141 @@
++"""V15.9 · Fase 4: matriz completa de apertura.
++
++Definición única de columnas (HT/RT/NT × UGL/OGL/NOM con cupos 5/10),
++posiciones vacantes en gris tenue (sin ID ni tiempo), casos fuera de casilla
++en «Sin clasificar» con causa y semáforo compartido con el Excel (nunca se
++inventan IDs ni tiempos; la ausencia de medición no es 0 ms).
++"""
++from dashboard.backend.app import _fila_publica, _matriz_apertura
++from utilidades.matriz_apertura import (
++    COLUMNAS_MATRIZ,
++    celda_caso,
++    celda_vacante,
++    criterio_desde_limites,
++    evaluar_apertura,
++    valor_confiable,
++)
++
++
++def fila(numero, tipo_st, temp, inflador, apertura, conflicto=False):
++    return {
++        "ruta": f"/tmp/{tipo_st}/{numero}", "nombre": str(numero), "identificador": str(numero),
++        "test_number": str(numero), "tipo_st": tipo_st, "temperature_condition": temp,
++        "inflator_type": inflador, "comparacion": {"resultado": "coincidencia_total"},
++        "confianza_ocr_pct": 95.0, "campos": {
++            "opening_time_ms": {"valor": apertura, "estado": "confirmado",
++                                "requiere_revision": conflicto},
++            "test_number": {"valor": str(numero)},
++        },
++    }
++
++
++def _matriz(brutas):
++    return _matriz_apertura([_fila_publica(f) for f in brutas])
++
++
++def test_matriz_expone_las_siete_columnas_y_sus_cupos_base():
++    matriz = _matriz([fila(1, "1ST", "HT", "UGL", 5.8)])
++    etapa = next(e for e in matriz["etapas"] if e["tipo_st"] == "1ST")
++    assert [c["id"] for c in etapa["columnas"]] == [c["id"] for c in COLUMNAS_MATRIZ]
++    ht_ugl = next(c for c in etapa["columnas"] if c["id"] == "HT_UGL")
++    assert ht_ugl["ocupados"] == 1
++    assert ht_ugl["cupos"] == 5 and ht_ugl["esperados"] == 5
++    assert len(ht_ugl["celdas"]) == 5
++    # Las posiciones sin caso son VACANTES (gris tenue), nunca celdas de caso gris.
++    vacantes = [c for c in ht_ugl["celdas"] if c["tipo"] == "vacante"]
++    assert len(vacantes) == 4
++    for v in vacantes:
++        assert v["id"] is None and v["test_number"] is None
++        assert v["opening_time_ms"] is None
++        assert v["estado"] == "vacante" and v["motivo_estado"] == "sin_caso"
++    caso = [c for c in ht_ugl["celdas"] if c["tipo"] == "caso"]
++    assert len(caso) == 1
++    assert caso[0]["test_number"] == "1"
++    assert caso[0]["estado"] == "verde"
++    # NT_NOM espera 10 y quedó completamente vacante.
++    nt_nom = next(c for c in etapa["columnas"] if c["id"] == "NT_NOM")
++    assert nt_nom["esperados"] == 10 and nt_nom["ocupados"] == 0
++    assert len(nt_nom["celdas"]) == 10
++
++
++def test_vacante_se_diferencia_del_gris_de_caso():
++    vacante = celda_vacante(1)
++    gris = celda_caso(_fila_publica(fila(4, "2ST", "RT", "NOM", None)),
++                      criterio_desde_limites(6.0, 7.0))
++    assert vacante["estado"] == "vacante" and gris["estado"] == "gris"
++    assert vacante["id"] is None and gris["id"] is not None
++    assert vacante["motivo_estado"] == "sin_caso"
++
++
++def test_semaforo_compartido_y_gris_sin_falsos_ceros():
++    brutas = [
++        fila(1, "1ST", "HT", "UGL", 6.0),    # verde inclusive
++        fila(2, "1ST", "HT", "OGL", 6.5),    # amarillo
++        fila(3, "1ST", "HT", "NOM", 7.5),    # rojo
++        fila(4, "2ST", "RT", "NOM", None),   # gris sin tiempo
++        fila(5, "2ST", "NT", "NOM", 5.0, conflicto=True),  # gris conflicto
++        fila(6, "2ST", "NT", "OGL", 0.0),    # 0 ms confiable SÍ es verde
++    ]
++    publicas = [_fila_publica(f) for f in brutas]
++    assert [f["semaforo_apertura"] for f in publicas] == [
++        "verde", "amarillo", "rojo", "gris", "gris", "verde"]
++    criterio = criterio_desde_limites(6.0, 7.0)
++    matriz = _matriz_apertura(publicas)
++    celdas = {}
++    for e in matriz["etapas"]:
++        for col in e["columnas"]:
++            for c in col["celdas"]:
++                if c["tipo"] == "caso":
++                    celdas[str(c["test_number"])] = c
++    assert celdas["1"]["estado"] == "verde" and celdas["1"]["opening_time_ms"] == 6.0
++    assert celdas["2"]["estado"] == "amarillo"
++    assert celdas["3"]["estado"] == "rojo"
++    # El gris nunca lleva 0 ni valor inventado: va a tiempo_pendiente_ms o queda vacío.
++    assert celdas["4"]["estado"] == "gris"
++    assert celdas["4"]["opening_time_ms"] is None
++    assert celdas["4"]["motivo_estado"] == "sin_tiempo"
++    assert celdas["5"]["estado"] == "gris"
++    assert celdas["5"]["opening_time_ms"] is None
++    assert celdas["5"]["tiempo_pendiente_ms"] == 5.0
++    assert celdas["5"]["motivo_estado"] in {"pendiente_revision", "conflicto"}
++    assert celdas["6"]["estado"] == "verde" and celdas["6"]["opening_time_ms"] == 0.0
++    # Contrato directo del evaluador compartido con el Excel.
++    assert evaluar_apertura(0.0, criterio) == ("verde", 0.0, "ok")
++    assert evaluar_apertura(None, criterio)[2] == "sin_tiempo"
++    assert evaluar_apertura(-1, criterio)[2] == "valor_negativo"
++    assert valor_confiable({"valor": 5.0, "requiere_revision": True}) is None
++
++
++def test_expansion_si_hay_mas_casos_que_esperados():
++    matriz = _matriz([fila(i, "1ST", "HT", "UGL", 5.8) for i in range(1, 13)])
++    ht_ugl = next(c for c in matriz["etapas"][0]["columnas"] if c["id"] == "HT_UGL")
++    assert ht_ugl["ocupados"] == 12 and ht_ugl["cupos"] == 12
++    assert all(c["tipo"] == "caso" for c in ht_ugl["celdas"])
++
++
++def test_sin_clasificar_con_causa_y_sin_inventar_posicion():
++    brutas = [
++        fila(7, "3RD", "HT", "UGL", 5.8),      # etapa fuera de 1ST/2ST
++        fila(8, "1ST", "XT", "UGL", 5.8),      # temperatura desconocida
++        fila(9, "1ST", "HT", "XYZ", 5.8),      # generador desconocido
++    ]
++    matriz = _matriz(brutas)
++    assert matriz["sin_clasificar"] and not any(
++        e["tipo_st"] == "1ST" and any(c["tipo"] == "caso"
++                                      for col in e["columnas"] for c in col["celdas"])
++        for e in matriz["etapas"])
++    fuera = {str(c["test_number"]): c for c in matriz["sin_clasificar"]}
++    assert set(fuera) == {"7", "8", "9"}
++    assert fuera["7"]["tipo_st"] == "3RD"          # causa a la vista, sin reclasificar
++    assert fuera["8"]["temperature_condition"] == "XT"
++    assert fuera["9"]["inflator_type"] == "XYZ"
++    for c in matriz["sin_clasificar"]:
++        assert c["tipo"] == "caso" and c["opening_time_ms"] == 5.8
++
++
++def test_matriz_vacia_o_solo_fuera_de_casilla():
++    assert _matriz_apertura([]) is None
++    # Sin ninguna fila reclasificable el backend conserva el grupo «Sin clasificar».
++    matriz = _matriz([fila(1, "3RD", "XT", "XYZ", 5.8)])
++    assert matriz["etapas"] == []
++    assert len(matriz["sin_clasificar"]) == 1
+diff --git a/reporte_bmg.py b/reporte_bmg.py
+index c0f571a..4cac2ee 100644
+--- a/reporte_bmg.py
++++ b/reporte_bmg.py
+@@ -2,8 +2,11 @@
+ 
+ Mantiene el aspecto del libro de referencia (Resumen / Versuchsmatrix) y usa
+ los campos consolidados del flujo empresarial. La matriz del resumen muestra
+-el estado del tiempo de apertura:
+-  verde <= 6 ms; amarillo > 6 y <= 7 ms; rojo > 7 ms; gris desconocido.
++el estado del tiempo de apertura con el MISMO motor de reglas que el dashboard
++(``utilidades.matriz_apertura``): verde ≤ V, amarillo > V y ≤ A, rojo > A y
++gris con motivo para valores no confiables o pendientes. V15.9 dibuja todas
++las posiciones esperadas: las vacantes llevan relleno gris tenue y nunca se
++inventan IDs ni tiempos.
+ """
+ 
+ from __future__ import annotations
+@@ -23,6 +26,12 @@ from openpyxl.utils import get_column_letter
+ 
+ from configuracion import evaluar_criterio
+ from flujo_empresarial import CLAVES_PLANTILLA
++from utilidades.matriz_apertura import (
++    COLUMNAS_MATRIZ,
++    criterio_desde_limites,
++    evaluar_apertura,
++    validar_limites,
++)
+ 
+ HOJA_RESUMEN = "Übersicht Standversuche"
+ HOJA_LISTA = "Versuchsmatrix"
+@@ -43,16 +52,29 @@ ORDEN_LISTA = {
+     ("RT", "NOM"): 6,
+ }
+ 
+-# Orden visual de la matriz resumen (izquierda -> derecha).
+-COLUMNAS_MATRIZ = [
+-    {"col": "D", "temperature_condition": "HT", "inflator_type": "UGL", "esperados": 5},
+-    {"col": "E", "temperature_condition": "HT", "inflator_type": "OGL", "esperados": 5},
+-    {"col": "F", "temperature_condition": "HT", "inflator_type": "NOM", "esperados": 10},
+-    {"col": "G", "temperature_condition": "RT", "inflator_type": "NOM", "esperados": 10},
+-    {"col": "H", "temperature_condition": "NT", "inflator_type": "NOM", "esperados": 10},
+-    {"col": "I", "temperature_condition": "NT", "inflator_type": "OGL", "esperados": 5},
+-    {"col": "J", "temperature_condition": "NT", "inflator_type": "UGL", "esperados": 5},
+-]
++# Orden visual de la matriz resumen (izquierda -> derecha) y cantidades
++# esperadas: definición única en utilidades.matriz_apertura (compartida con el
++# dashboard). ``col`` conserva la letra de columna de la plantilla BMG.
++
++# Gris tenue para posiciones esperadas SIN caso: se distingue del gris de
++# "valor no confiable" (gris estándar de la paleta) por relleno y por comentario.
++COLOR_VACANTE = "#D9D9D9"
++
++MOTIVOS_GRIS = {
++    "sin_tiempo": {"es": "Sin tiempo medido", "en": "No measured time",
++                   "de": "Keine gemessene Zeit"},
++    "pendiente_revision": {"es": "Pendiente de revisión", "en": "Pending review",
++                           "de": "Prüfung ausstehend"},
++    "conflicto": {"es": "Conflicto entre fuentes", "en": "Conflict between sources",
++                  "de": "Widerspruch zwischen Quellen"},
++    "valor_no_finito": {"es": "Valor no finito descartado", "en": "Non-finite value discarded",
++                        "de": "Unendlicher Wert verworfen"},
++    "valor_negativo": {"es": "Valor negativo descartado", "en": "Negative value discarded",
++                       "de": "Negativer Wert verworfen"},
++    "sin_caso": {"es": "Posición esperada sin caso asignado",
++                 "en": "Expected position without assigned case",
++                 "de": "Erwartete Position ohne zugeordneten Fall"},
++}
+ 
+ 
+ TEXTOS = {
+@@ -60,6 +82,16 @@ TEXTOS = {
+     "en": {"overview":"Overview results","opening":"Opening time","expected":"Expected quantity","found":"Found","processed":"Processed","unclassified":"Cases outside matrix classification","unknown":"Unknown / pending","state":"State","trace":"Traceability","dictionary":"Data dictionary","project":"Project","stage":"Stage","case":"Case","component":"Component","field":"Field","image":"Image","region":"Original region","original":"Original OCR text","corrected":"Corrected text","orientation":"Orientation","rule":"Rule","source":"Source","version":"Processing version","header":"Header","origin_rule":"Origin / rule","status":"Source status","pending":"Pending source or manual confirmation","test_temperature":"Test temperature","generator_type":"Generator type","ok_test":"OK test","ma_test":"Conditional test","nio_test":"NOK test"},
+     "de": {"overview":"Übersicht Ergebnisse","opening":"Öffnungszeit","expected":"Erwartete Anzahl","found":"Gefunden","processed":"Verarbeitet","unclassified":"Fälle außerhalb der Matrixklassifikation","unknown":"Unbekannt / ausstehend","state":"Status","trace":"Rückverfolgbarkeit","dictionary":"Datenwörterbuch","project":"Projekt","stage":"Stufe","case":"Fall","component":"Komponente","field":"Feld","image":"Bild","region":"Originalbereich","original":"Original OCR-Text","corrected":"Korrigierter Text","orientation":"Orientierung","rule":"Regel","source":"Quelle","version":"Verarbeitungsversion","header":"Überschrift","origin_rule":"Quelle / Regel","status":"Quellenstatus","pending":"Quelle oder manuelle Bestätigung ausstehend","test_temperature":"Prüftemperatur","generator_type":"Generatortyp","ok_test":"OK Test","ma_test":"m.A. Test","nio_test":"N.i.O Test"},
+ }
++# V15.9: leyenda ampliada con la posición vacante y los motivos del gris.
++for _idioma, _extra in (
++    ("es", {"vacant": "Vacante (posición esperada sin caso)",
++            "reason": "Motivo", "criteria_origin": "Origen del criterio"}),
++    ("en", {"vacant": "Vacant (expected position without case)",
++            "reason": "Reason", "criteria_origin": "Criteria origin"}),
++    ("de", {"vacant": "Frei (erwartete Position ohne Fall)",
++            "reason": "Grund", "criteria_origin": "Ursprung der Kriterien"}),
++):
++    TEXTOS[_idioma].update(_extra)
+ 
+ HEADERS = {
+     "week":{"es":"Semana","en":"Week","de":"Woche"},
+@@ -377,13 +409,34 @@ def _ordenar_etapa(resultados: Iterable[dict]) -> list[dict]:
+ 
+ 
+ def _estado_apertura(resultado: dict, reglas: dict) -> tuple[str, float | None]:
+-    valor = _tiempo_ms(_campo_confiable(resultado, "opening_time_ms"))
+-    if valor is None:
+-        return "gris", None
++    """(estado, valor) del semáforo de apertura.
++
++    V15.9 comparte el evaluador con el dashboard (``utilidades.matriz_apertura``);
++    el contrato numérico se conserva: sin valor confiable se reporta (\"gris\", None).
++    """
++    dato = _campo_confiable_dict(resultado, "opening_time_ms")
+     criterio = (reglas.get("criterios") or {}).get("tiempo_apertura_ms") or {
+         "verde": "<= 6", "amarillo": "6-7", "rojo": "> 7"
+     }
+-    return evaluar_criterio(criterio, valor) or "gris", valor
++    estado, valor, motivo = evaluar_apertura(dato, criterio)
++    if motivo in {"sin_tiempo", "pendiente_revision", "conflicto",
++                  "valor_no_finito", "valor_negativo"}:
++        return "gris", None
++    return estado, valor
++
++
++def _campo_confiable_dict(resultado: dict, clave: str):
++    """El ``dato`` completo de ``campos`` (para distinguir motivos del gris) o None.
++
++    Misma fuente que ``_campo_confiable``: sólo ``campos[clave]``; un valor
++    plano se envuelve como ``{"valor": ...}`` para el evaluador compartido.
++    """
++    dato = (resultado.get("campos") or {}).get(clave)
++    if isinstance(dato, dict):
++        return dato
++    if dato in (None, ""):
++        return None
++    return {"valor": dato}
+ 
+ 
+ def _relleno(hex_color: str) -> PatternFill:
+@@ -464,14 +517,23 @@ def _copiar_lista_a_rangos(libro, resultados: list[dict], idioma: str = "es") ->
+ 
+ def _poblar_matriz(hoja, tipo_st: str, resultados: list[dict], fila_inicio: int,
+                    mapa_filas: dict[str, int], colores: dict, reglas: dict, idioma: str = "es") -> int:
+-    """Dibuja un bloque de matriz completo; crece sin truncar y mueve 2ST si hace falta."""
++    """Dibuja un bloque de matriz completo; crece sin truncar y mueve 2ST si hace falta.
++
++    V15.9: se renderizan TODAS las posiciones esperadas. Las celdas de casos
++    usan el semáforo compartido (verde/amarillo/rojo/gris con motivo) y las
++    posiciones sin caso llevan relleno gris tenue de vacante. Nunca se inventan
++    IDs ni tiempos y ningún cupo queda invisible.
++    """
+     mapa_color={"verde":colores.get("verde","#00B050"),"amarillo":colores.get("amarillo","#FFD966"),"rojo":colores.get("rojo","#FF0000"),"gris":colores.get("gris","#A6A6A6")}
++    criterio=(reglas.get("criterios") or {}).get("tiempo_apertura_ms") or {"verde":"<= 6","amarillo":"6-7","rojo":"> 7"}
+     etapa=[r for r in resultados if str(r.get("tipo_st") or "").upper()==tipo_st]
+     grupos=[]
+     for spec in COLUMNAS_MATRIZ:
+         grupo=[r for r in etapa if str(r.get("temperature_condition") or _campo(r,"temperature_condition") or "").upper()==spec["temperature_condition"] and str(r.get("inflator_type") or _campo(r,"inflator_type") or "").upper()==spec["inflator_type"]]
+         grupos.append((spec,sorted(grupo,key=_test_sort,reverse=True)))
+-    alto=max([10,*[len(g) for _,g in grupos]])
++    # Cupos por columna: cantidad esperada, ampliada si hay más casos.
++    cupos={spec["id"]: max(int(spec["esperados"]), len(grupo)) for spec,grupo in grupos}
++    alto=max(cupos.values(), default=10)
+ 
+     # Replica estilos de la plantilla para filas añadidas dinámicamente.
+     fuente_titulo = 6 if tipo_st == "1ST" else 32
+@@ -487,16 +549,33 @@ def _poblar_matriz(hoja, tipo_st: str, resultados: list[dict], fila_inicio: int,
+             c=hoja.cell(r,col); c.value=None; c.hyperlink=None; c.comment=None
+             if col>=4: c.fill=PatternFill(fill_type=None)
+ 
++    def _comentario_celda(estado, motivo, tiempo):
++        if estado == "gris":
++            razon = MOTIVOS_GRIS.get(motivo, MOTIVOS_GRIS["sin_tiempo"])[idioma if idioma in {"es","en","de"} else "es"]
++            detalle = razon if tiempo is None else f"{razon} ({_t(idioma,'opening')}: {tiempo:g} ms)"
++            return f"{detalle}\n{_t(idioma,'state')}: gris"
++        return f"{_t(idioma,'opening')}: {tiempo:g} ms\n{_t(idioma,'state')}: {estado}"
++
+     for spec,grupo in grupos:
+-        arranque=fila_inicio+max(0,alto-len(grupo))
++        col_letra=spec["col"]; total_cupos=cupos[spec["id"]]
++        banda_inicio=fila_inicio+alto-total_cupos
++        arranque=banda_inicio+(total_cupos-len(grupo))
++        # Posiciones esperadas sin caso asignado: visibles, grises y sin ID.
++        texto_vacante=MOTIVOS_GRIS["sin_caso"][idioma if idioma in {"es","en","de"} else "es"]
++        for fila_v in range(banda_inicio, arranque):
++            c=hoja[f"{col_letra}{fila_v}"]
++            c.fill=_relleno(COLOR_VACANTE)
++            c.comment=Comment(f"{texto_vacante}\n{_t(idioma,'state')}: vacante","OCR Versuchsmatrix")
+         for indice,resultado in enumerate(grupo):
+-            fila=arranque+indice; c=hoja[f"{spec['col']}{fila}"]
++            fila=arranque+indice; c=hoja[f"{col_letra}{fila}"]
+             numero=resultado.get("test_number") or _campo(resultado,"test_number") or resultado.get("identificador")
+-            c.value=numero; estado,tiempo=_estado_apertura(resultado,reglas); c.fill=_relleno(mapa_color[estado])
++            c.value=numero
++            dato=_campo_confiable_dict(resultado,"opening_time_ms")
++            estado,tiempo,motivo=evaluar_apertura(dato,criterio)
++            c.fill=_relleno(mapa_color.get("gris","#A6A6A6") if estado=="gris" else mapa_color[estado])
+             detalle=mapa_filas.get(_identidad(resultado))
+             if detalle: c.hyperlink=f"#'{HOJA_LISTA}'!C{detalle}"
+-            desc=_t(idioma,"unknown") if tiempo is None else f"{_t(idioma,'opening')}: {tiempo:g} ms"
+-            c.comment=Comment(f"{desc}\n{_t(idioma,'state')}: {estado}","OCR Versuchsmatrix")
++            c.comment=Comment(_comentario_celda(estado,motivo,tiempo),"OCR Versuchsmatrix")
+ 
+     pie=fila_inicio+alto
+     # Conserva el pie visual de la plantilla y añade conteos reales separados de
+@@ -558,6 +637,10 @@ def _crear_leyenda_matriz(hoja, fila: int, colores: dict, idioma: str) -> None:
+         c=hoja.cell(fila+off,2); c.value=texto
+         c.fill=_relleno(colores.get(estado, {"verde":"#00B050","amarillo":"#FFD966","rojo":"#FF0000","gris":"#A6A6A6"}[estado]))
+         c.font=Font(color="000000",bold=(estado=="gris"))
++    # V15.9: la vacante se distingue del gris de valor desconocido.
++    c_vac=hoja.cell(fila+len(items),2); c_vac.value=_t(idioma,"vacant")
++    c_vac.fill=_relleno(COLOR_VACANTE)
++    c_vac.font=Font(color="000000")
+ 
+ 
+ 
+@@ -713,10 +796,27 @@ def _guardar_atomico(libro, destino: Path, intentos: int=6) -> None:
+ 
+ 
+ def generar_reporte_bmg(ruta_plantilla: str | Path, ruta_salida: str | Path,
+-                        resultados: list[dict], config: dict, reglas: dict, idioma: str="es") -> Path:
+-    """Genera un único Excel 1ST+2ST, dinámico, traducido y trazable."""
++                        resultados: list[dict], config: dict, reglas: dict, idioma: str="es",
++                        criterios_apertura: dict | None = None) -> Path:
++    """Genera un único Excel 1ST+2ST, dinámico, traducido y trazable.
++
++    ``criterios_apertura`` (V15.9) es la instantánea de la ejecución
++    ``{"verde_max": …, "amarillo_max": …, "origen": …}``: cuando se pasa, el
++    semáforo de ESTE Excel usa esos límites y no una preferencia posterior,
++    de modo que pantalla y libro no divergen. Sin instantánea se usan las
++    reglas vigentes (compatibilidad).
++    """
+     idioma=(idioma or "es").lower()
+     if idioma not in {"es","en","de"}: raise ValueError("Idioma de exportación no válido: es, en o de.")
++    if criterios_apertura is not None:
++        try:
++            verde, amarillo = validar_limites(criterios_apertura.get("verde_max"),
++                                              criterios_apertura.get("amarillo_max"))
++        except (ValueError, TypeError) as exc:
++            raise ValueError(f"Los límites de apertura de la ejecución no son válidos: {exc}") from exc
++        reglas = {**reglas,
++                  "criterios": {**(reglas.get("criterios") or {}),
++                                "tiempo_apertura_ms": criterio_desde_limites(verde, amarillo)}}
+     # Las revisiones se incorporan a una copia: exportar nunca muta resultados
+     # compartidos con el reanálisis o el escritor de validación.
+     from maximos_video import incorporar_maximos
+diff --git a/utilidades/matriz_apertura.py b/utilidades/matriz_apertura.py
+new file mode 100644
+index 0000000..00e22aa
+--- /dev/null
++++ b/utilidades/matriz_apertura.py
+@@ -0,0 +1,329 @@
++"""Definición única de la matriz de apertura y del semáforo de tiempos.
++
++V15.9: el dashboard y el Excel dejan de duplicar reglas. Este módulo define:
++
++- Las columnas de la matriz (HT/RT/NT × UGL/OGL/NOM) con su cantidad esperada.
++- La evaluación del semáforo de apertura a partir de los límites confirmados
++  (verde ≤ V, V < amarillo ≤ A, rojo > A) con valores por defecto 6/7 ms.
++- La construcción de las celdas: ocupada (verde/amarillo/rojo/gris con motivo)
++  o vacante (posición esperada sin caso asignado). Nunca se inventan IDs ni
++  tiempos y nunca se sustituye la ausencia de medición por cero.
++
++Los valores sólo se colorean cuando son finitos, no negativos y confiables
++(``estado`` ni ``conflicto``/``pendiente_revision`` ni ``requiere_revision``).
++"""
++from __future__ import annotations
++
++import math
++import re
++from typing import Iterable
++
++from configuracion import evaluar_criterio
++
++# Orden visual de la matriz resumen (izquierda -> derecha) y cupos esperados.
++COLUMNAS_MATRIZ: list[dict] = [
++    {"id": "HT_UGL", "col": "D", "temperature_condition": "HT", "inflator_type": "UGL",
++     "temperatura": "+85°C", "generador": "UGL", "esperados": 5},
++    {"id": "HT_OGL", "col": "E", "temperature_condition": "HT", "inflator_type": "OGL",
++     "temperatura": "+85°C", "generador": "OGL", "esperados": 5},
++    {"id": "HT_NOM", "col": "F", "temperature_condition": "HT", "inflator_type": "NOM",
++     "temperatura": "+85°C", "generador": "nominal", "esperados": 10},
++    {"id": "RT_NOM", "col": "G", "temperature_condition": "RT", "inflator_type": "NOM",
++     "temperatura": "RT", "generador": "nominal", "esperados": 10},
++    {"id": "NT_NOM", "col": "H", "temperature_condition": "NT", "inflator_type": "NOM",
++     "temperatura": "-35°C", "generador": "nominal", "esperados": 10},
++    {"id": "NT_OGL", "col": "I", "temperature_condition": "NT", "inflator_type": "OGL",
++     "temperatura": "-35°C", "generador": "OGL", "esperados": 5},
++    {"id": "NT_UGL", "col": "J", "temperature_condition": "NT", "inflator_type": "UGL",
++     "temperatura": "-35°C", "generador": "UGL", "esperados": 5},
++]
++
++COMBINACIONES_MATRIZ = {(s["temperature_condition"], s["inflator_type"]) for s in COLUMNAS_MATRIZ}
++
++# Valores iniciales del proyecto: 5.8 ms -> verde; 6.4 ms -> amarillo; 7.2 ms -> rojo.
++VERDE_PREDETERMINADO_MS = 6.0
++AMARILLO_PREDETERMINADO_MS = 7.0
++
++_ESTADOS_NO_COLOR = {"conflicto", "pendiente_revision", "error", "descartado"}
++_RE_VERDE = re.compile(r"^<=\s*([0-9]+(?:[.,][0-9]+)?)\s*(?:ms)?$", re.IGNORECASE)
++_RE_ROJO = re.compile(r"^>\s*([0-9]+(?:[.,][0-9]+)?)\s*(?:ms)?$", re.IGNORECASE)
++
++
++def limites_predefinidos() -> tuple[float, float]:
++    """(verde hasta, amarillo hasta) predeterminados del proyecto: 6.0 / 7.0 ms."""
++    return VERDE_PREDETERMINADO_MS, AMARILLO_PREDETERMINADO_MS
++
++
++def criterio_desde_limites(verde_max: float, amarillo_max: float) -> dict:
++    """Reglas legibles del semáforo a partir de los dos límites numéricos."""
++    verde, amarillo = validar_limites(verde_max, amarillo_max)
++    return {"verde": f"<= {verde:g}", "amarillo": f"{verde:g}-{amarillo:g}",
++            "rojo": f"> {amarillo:g}"}
++
++
++def validar_limites(verde_max, amarillo_max) -> tuple[float, float]:
++    """Valida los límites: números finitos, no negativos y 0 ≤ verde < amarillo."""
++    for valor in (verde_max, amarillo_max):
++        if isinstance(valor, bool) or not isinstance(valor, (int, float)) \
++                or not math.isfinite(valor):
++            raise ValueError("Los límites deben ser números finitos (se admiten decimales en ms).")
++    verde, amarillo = float(verde_max), float(amarillo_max)
++    if verde < 0 or amarillo < 0:
++        raise ValueError("Los límites no pueden ser negativos.")
++    if not verde < amarillo:
++        raise ValueError("Los límites deben cumplir: 0 ≤ verde < amarillo; el rojo queda por encima.")
++    return verde, amarillo
++
++
++def limites_desde_criterio(criterio: dict | None) -> tuple[float, float]:
++    """Recupera (verde, amarillo) desde las reglas de texto del criterio."""
++    criterio = criterio or {}
++    m_v = _RE_VERDE.match(str(criterio.get("verde") or "").strip())
++    m_r = _RE_ROJO.match(str(criterio.get("rojo") or "").strip())
++    if m_v and m_r:
++        try:
++            return validar_limites(float(m_v.group(1).replace(",", ".")),
++                                   float(m_r.group(1).replace(",", ".")))
++        except ValueError:
++            pass
++    return limites_predefinidos()
++
++
++def criterio_apertura_efectivo(reglas: dict | None = None,
++                               criterios_usuario: dict | None = None,
++                               instantanea: dict | None = None) -> tuple[dict, str]:
++    """Criterio vigente y su origen: instantánea de ejecución > usuario > YAML/default.
++
++    Devuelve (criterio_texto, origen) con origen en
++    ``instantanea_ejecucion | criterios_usuario | predeterminado``.
++    """
++    if instantanea:
++        try:
++            verde, amarillo = validar_limites(instantanea.get("verde_max"),
++                                              instantanea.get("amarillo_max"))
++            return criterio_desde_limites(verde, amarillo), "instantanea_ejecucion"
++        except (ValueError, TypeError):
++            pass
++    if criterios_usuario:
++        try:
++            verde, amarillo = validar_limites(criterios_usuario.get("verde_max"),
++                                              criterios_usuario.get("amarillo_max"))
++            return criterio_desde_limites(verde, amarillo), "criterios_usuario"
++        except (ValueError, TypeError):
++            pass
++    reglas = reglas or {}
++    criterio = (reglas.get("criterios") or {}).get("tiempo_apertura_ms")
++    if criterio:
++        try:
++            return dict(criterio), "yaml"
++        except (TypeError, ValueError):
++            pass
++    verde, amarillo = limites_predefinidos()
++    return criterio_desde_limites(verde, amarillo), "predeterminado"
++
++
++def _numero_ms(valor):
++    if isinstance(valor, bool) or valor in {None, "", "--", "-"}:
++        return None
++    try:
++        numero = float(str(valor).strip().lower().replace("ms", "").replace(",", "."))
++    except (TypeError, ValueError):
++        return None
++    return numero if math.isfinite(numero) else None
++
++
++def valor_confiable(dato) -> float | None:
++    """Valor usable para colorear: finito, ≥ 0 y sin revisión/conflicto pendiente."""
++    if dato is None:
++        return None
++    if isinstance(dato, dict):
++        if dato.get("requiere_revision") or str(dato.get("estado") or "") in _ESTADOS_NO_COLOR:
++            return None
++        numero = _numero_ms(dato.get("valor"))
++    else:
++        numero = _numero_ms(dato)
++    if numero is None or numero < 0:
++        return None
++    return numero
++
++
++def evaluar_apertura(valor_ms, criterio: dict, dato=None) -> tuple[str, float | None, str]:
++    """(estado, valor, motivo) de una celda de apertura.
++
++    ``estado`` en verde/amarillo/rojo/gris. El motivo explica el gris:
++    ``sin_tiempo``, ``valor_no_finito``, ``valor_negativo``, ``pendiente_revision``,
++    ``conflicto`` o ``sin_caso`` (posición vacante) — o ``ok`` cuando hay color.
++    """
++    if dato is None and isinstance(valor_ms, dict):
++        dato, valor_ms = valor_ms, valor_ms.get("valor")
++    if dato is not None and (dato.get("requiere_revision")
++                             or str(dato.get("estado") or "") in _ESTADOS_NO_COLOR):
++        motivo = ("conflicto" if str(dato.get("estado") or "") == "conflicto"
++                  else "pendiente_revision")
++        return "gris", _numero_ms(dato.get("valor")), motivo
++    numero = _numero_ms(valor_ms)
++    if numero is None:
++        return "gris", None, "sin_tiempo"
++    if not math.isfinite(numero):
++        return "gris", None, "valor_no_finito"
++    if numero < 0:
++        return "gris", None, "valor_negativo"
++    estado = evaluar_criterio(criterio, numero) or "gris"
++    return estado, numero, ("ok" if estado != "gris" else "sin_regla")
++
++
++def regla_publica(criterio: dict, origen: str | None = None, nota_gris: str | None = None) -> dict:
++    """Texto de leyenda común para el dashboard y el Excel.
++
++    Los límites numéricos se muestran con la unidad «ms» (p. ej. ``<= 6 ms``),
++    como publica la API del dashboard desde V15.8.
++    """
++    def _con_unidad(valor) -> str:
++        texto = str(valor or "—")
++        return texto if "ms" in texto.lower() or texto == "—" else f"{texto} ms"
++
++    regla = {
++        "verde": _con_unidad(criterio.get("verde")),
++        "amarillo": _con_unidad(criterio.get("amarillo")),
++        "rojo": _con_unidad(criterio.get("rojo")),
++        "gris": nota_gris or "sin tiempo confiable, pendiente/conflicto o sin caso",
++    }
++    if origen:
++        regla["origen_criterio"] = origen
++    return regla
++
++
++def _campo_resultado(fila: dict, clave: str):
++    dato = (fila.get("campos") or {}).get(clave)
++    if isinstance(dato, dict):
++        return dato
++    if dato not in {None, ""}:
++        return {"valor": dato}
++    return None
++
++
++def _test_number(fila: dict):
++    dato = _campo_resultado(fila, "test_number")
++    if isinstance(dato, dict) and dato.get("valor") not in {None, ""}:
++        return dato.get("valor")
++    return fila.get("test_number") or fila.get("identificador") or fila.get("nombre")
++
++
++def _clave_orden(fila: dict):
++    valor = _test_number(fila)
++    try:
++        return (0, int(str(valor).strip()))
++    except (TypeError, ValueError):
++        return (1, str(valor or ""))
++
++
++def celda_caso(fila: dict, criterio: dict) -> dict:
++    """Celda ocupada por un caso, con estado y motivo trazables.
++
++    Acepta tanto resultados crudos (``campos.opening_time_ms``) como filas ya
++    publicadas por el backend (``semaforo_apertura`` + ``opening_time_ms``), en
++    cuyo caso se respeta el estado publicado para no evaluar dos veces.
++    """
++    if "campos" in fila:
++        dato = _campo_resultado(fila, "opening_time_ms")
++        estado, valor, motivo = evaluar_apertura(dato, criterio)
++    else:
++        valor = _numero_ms(fila.get("opening_time_ms"))
++        pendiente = _numero_ms(fila.get("opening_time_pendiente_ms"))
++        estado = str(fila.get("semaforo_apertura") or "gris")
++        motivo = fila.get("apertura_motivo")
++        if estado != "gris" and valor is not None:
++            motivo = "ok"
++        elif not motivo:
++            motivo = ("sin_tiempo" if pendiente is None else "pendiente_revision")
++        if estado == "gris" and valor is None and pendiente is not None:
++            valor = pendiente
++    es_gris = estado == "gris"
++    return {
++        "tipo": "caso",
++        "id": fila.get("id"),
++        "test_number": _test_number(fila),
++        "estado": estado,
++        "motivo_estado": motivo,
++        "opening_time_ms": (None if valor is None or es_gris else round(float(valor), 3)),
++        "tiempo_pendiente_ms": (round(float(valor), 3) if es_gris and valor is not None else None),
++        "enlace": fila.get("enlace"),
++    }
++
++
++def celda_vacante(indice: int) -> dict:
++    """Posición esperada sin caso asignado: nunca lleva ID ni tiempo."""
++    return {"tipo": "vacante", "id": None, "test_number": None,
++            "estado": "vacante", "motivo_estado": "sin_caso",
++            "opening_time_ms": None, "enlace": None, "posicion": indice}
++
++
++def agrupar_casos(filas: Iterable[dict]) -> tuple[dict[tuple[str, str], list[dict]], list[dict]]:
++    """Separa los casos por columna de matriz y los que quedan sin clasificar."""
++    por_columna: dict[tuple[str, str], list[dict]] = {c: [] for c in COMBINACIONES_MATRIZ}
++    sin_clasificar: list[dict] = []
++    for fila in filas:
++        temp = str(fila.get("temperature_condition") or "").upper()
++        gen = str(fila.get("inflator_type") or "").upper()
++        etapa = str(fila.get("tipo_st") or "").upper()
++        clave = (temp, gen)
++        if etapa in {"1ST", "2ST"} and clave in COMBINACIONES_MATRIZ:
++            por_columna[clave].append(fila)
++        else:
++            sin_clasificar.append(fila)
++    for grupo in por_columna.values():
++        grupo.sort(key=_clave_orden, reverse=True)
++    sin_clasificar.sort(key=_clave_orden)
++    return por_columna, sin_clasificar
++
++
++def construir_columnas(filas_etapa: list[dict], criterio: dict) -> list[dict]:
++    """Columnas con TODAS sus posiciones: cupos ``esperados`` y expansión si hay más."""
++    por_columna, _ = agrupar_casos(filas_etapa)
++    columnas = []
++    for spec in COLUMNAS_MATRIZ:
++        grupo = por_columna[(spec["temperature_condition"], spec["inflator_type"])]
++        cupos = max(int(spec["esperados"]), len(grupo))
++        celdas = [celda_vacante(i + 1) for i in range(cupos - len(grupo))]
++        celdas.extend(celda_caso(f, criterio) for f in grupo)
++        columnas.append({**spec, "celdas": celdas, "ocupados": len(grupo),
++                         "cupos": cupos, "esperados": int(spec["esperados"])})
++    return columnas
++
++
++def construir_sin_clasificar(filas_fuera: list[dict], criterio: dict) -> list[dict]:
++    """Casos visibles fuera de las columnas: sin etapa/temperatura/generador verificable."""
++    salida = []
++    for fila in filas_fuera:
++        celda = celda_caso(fila, criterio)
++        celda.update({
++            "tipo_st": fila.get("tipo_st"),
++            "temperature_condition": fila.get("temperature_condition"),
++            "inflator_type": fila.get("inflator_type"),
++        })
++        salida.append(celda)
++    return salida
++
++
++def construir_matriz_dashboard(filas: list[dict], criterio: dict,
++                               origen: str | None = None) -> dict | None:
++    """Matriz completa para el dashboard (todas las posiciones, nunca invisibles)."""
++    if not filas:
++        return None
++    etapas = []
++    for tipo_st in ("1ST", "2ST"):
++        etapa = [f for f in filas if str(f.get("tipo_st") or "").upper() == tipo_st]
++        if not etapa:
++            continue
++        etapas.append({"tipo_st": tipo_st, "columnas": construir_columnas(etapa, criterio)})
++    _, fuera = agrupar_casos(filas)
++    sin_clasificar = construir_sin_clasificar(fuera, criterio)
++    if not etapas and not sin_clasificar:
++        return None
++    return {
++        "etapas": etapas,
++        "sin_clasificar": sin_clasificar,
++        "regla": regla_publica(criterio, origen),
++        "criterio": dict(criterio),
++        "origen_criterio": origen,
++    }
+diff --git a/video_airbag.py b/video_airbag.py
+index 96f771d..8faafbd 100644
+--- a/video_airbag.py
++++ b/video_airbag.py
+@@ -35,7 +35,7 @@ EXTENSIONES_VIDEO = {".avi", ".mp4", ".mov", ".mkv", ".wmv", ".m4v"}
+ CARPETAS_VIDEO = {"video", "videos"}
+ RUTA_CACHE = RAIZ_PROYECTO / ".cache_ocr" / "video_airbag.json"
+ RUTA_REVISIONES = RAIZ_PROYECTO / ".aprendizaje" / "revisiones_video.json"
+-ALGORITMO_VERSION = "v15.8-ruptura-nativa-corroborada"
++ALGORITMO_VERSION = "v15.9-dos-momentos-fuentes-consenso"
+ 
+ 
+ def _cfg(config: dict | None = None) -> dict:
+@@ -982,8 +982,8 @@ def _metricas_primer_blanco(roi: np.ndarray, baseline: np.ndarray, cfg: dict,
+     """
+     actual = roi.astype(np.int16)
+     base = baseline.astype(np.int16)
+-    delta = actual - base
+-    delta = delta - int(round(float(np.median(delta))))
++    delta_crudo = actual - base
++    delta = delta_crudo - int(round(float(np.median(delta_crudo))))
+     lum = int(cfg.get("umbral_luminancia_blanco", 135))
+     inc = int(cfg.get("umbral_incremento_blanco", 18))
+     mascara_brillo = (actual >= lum) & (delta >= inc)
+@@ -1076,6 +1076,39 @@ def _metricas_primer_blanco(roi: np.ndarray, baseline: np.ndarray, cfg: dict,
+     e1 = cv2.Canny(gris_actual, 45, 120)
+     e0d = cv2.dilate((e0 > 0).astype(np.uint8), np.ones((3, 3), np.uint8), iterations=1)
+     bordes_nuevos = int(np.count_nonzero((e1 > 0) & (e0d == 0)))
++
++    # V15.9: puntuaciones separadas por fuente de señal. Un mismo contorno de
++    # ruptura (fisura/tela clara) debe dominar sobre abombamiento, reflejo,
++    # movimiento de cámara, iluminación global y ruido de compresión.
++    iluminacion_global = float(np.mean(delta_crudo))
++    abombamiento_px = int(np.count_nonzero(
++        (np.abs(delta_crudo) >= inc) & (np.abs(residuo) < residuo_min))) if compensado \
++        else int(np.count_nonzero(np.abs(delta_crudo) >= inc))
++    reflejo_mask = (actual >= 245) & (delta_crudo >= inc)
++    reflejo_px = int(np.count_nonzero(reflejo_mask))
++    movimiento_camara_px = 0.0
++    try:
++        punto, _respuesta = cv2.phaseCorrelate(base.astype(np.float32), actual.astype(np.float32))
++        movimiento_camara_px = float(math.hypot(float(punto[0]), float(punto[1])))
++        if not math.isfinite(movimiento_camara_px):
++            movimiento_camara_px = 0.0
++    except (cv2.error, TypeError, ValueError, IndexError):
++        movimiento_camara_px = 0.0
++    scores_fuentes = {
++        "fisura": round(pixeles_grieta / total if total else 0.0, 8),
++        "tela_clara": round(pixeles / total if total else 0.0, 8),
++        "abombamiento": round(abombamiento_px / total if total else 0.0, 8),
++        "reflejo": round(reflejo_px / total if total else 0.0, 8),
++        "movimiento_camara_px": round(movimiento_camara_px, 4),
++        "iluminacion_global": round(iluminacion_global, 4),
++        "ruido_compresion": round(float((ruido or {}).get("score_max") or 0.0), 4),
++        "bordes_nuevos": round(bordes_nuevos / total if total else 0.0, 8),
++    }
++    # Cambio suave y global (luz, cámara, tablero que se hincha) sin la
++    # discontinuidad local nueva que exige la ruptura: se señala para rechazo.
++    cambio_global_sospechoso = bool(
++        abs(iluminacion_global) >= float(cfg.get("umbral_iluminacion_global", 25.0))
++        and pixeles_ruptura < min_pix)
+     return {
+         "pixeles_blanco_nuevo": pixeles,
+         "pixeles_grieta_nueva": pixeles_grieta,
+@@ -1101,6 +1134,8 @@ def _metricas_primer_blanco(roi: np.ndarray, baseline: np.ndarray, cfg: dict,
+         "min_componente_debil": min_comp_debil,
+         "evidencia_debil": bool(evidencia_debil),
+         "detectado": bool(detectado),
++        "scores_fuentes": scores_fuentes,
++        "cambio_global_sospechoso": cambio_global_sospechoso,
+     }
+ 
+ 
+@@ -1127,6 +1162,32 @@ def _ruido_baseline(rois_base: list[np.ndarray], cfg: dict) -> dict:
+             "cuadros": len(rois_base)}
+ 
+ 
++def _baseline_contiene_evento(rois_base: list[np.ndarray], cfg: dict) -> dict:
++    """¿Los cuadros de referencia ya muestran el airbag desplegado?
++
++    V15.9: si un cuadro del baseline conserva evidencia fuerte de ruptura
++    contra la mediana de los demás, el video empieza con el evento en curso.
++    Se devuelve incertidumbre (``evento_al_inicio``) y se requiere revisión,
++    sin inventar un origen artificial en el primer cuadro.
++    """
++    detecciones = []
++    if len(rois_base) >= 2:
++        cfg_crudo = dict(cfg)
++        cfg_crudo["compensar_movimiento"] = False
++        for i, roi in enumerate(rois_base):
++            otros = [r for j, r in enumerate(rois_base) if j != i]
++            ref = np.median(np.stack(otros, axis=0), axis=0).astype(np.uint8)
++            m = _metricas_primer_blanco(roi.astype(np.uint8), ref, cfg_crudo)
++            if m.get("detectado") or (
++                    m.get("evidencia_debil") and
++                    int(m.get("componente_ruptura_px") or 0) >=
++                    max(2, int(m.get("min_componente_blanco") or 1))):
++                detecciones.append({"frame_baseline": i,
++                                    "pixeles_ruptura": int(m.get("pixeles_ruptura") or 0),
++                                    "componente_px": int(m.get("componente_ruptura_px") or 0)})
++    return {"evento_al_inicio": bool(detecciones), "evidencia_baseline": detecciones}
++
++
+ def _cerca(a: dict, b: dict, margen: float = 0.08) -> bool:
+     """¿La evidencia ``a`` está en el mismo sitio que la componente ``b``?"""
+     ca = a.get("centro_componente_norm")
+@@ -1325,6 +1386,62 @@ def _puntaje_apertura(metricas: dict, score_diff: float, umbral: float,
+     return max(0.0, min(0.99, score))
+ 
+ 
++def _razones_evento(resultado: dict, metricas: list[dict], confirmacion: dict | None,
++                    zona: dict | None, deteccion_inicio: dict) -> dict:
++    """Evidencia explicable del evento (V15.9): qué se vio, dónde y con qué calidad.
++
++    Incluye primer cuadro y cuadro confirmatorio, ROI y microzona, puntuaciones
++    separadas por fuente (fisura/tela clara/abombamiento/reflejo/movimiento de
++    cámara/ruido), reloj/FPS usados, calidad y advertencias abiertas.
++    """
++    indice = resultado.get("frame_evento")
++    mb = ((confirmacion or {}).get("metricas_inicio") or
++          (metricas[indice] if isinstance(indice, int) and 0 <= indice < len(metricas) else {}))
++    scores = mb.get("scores_fuentes") or {}
++    advertencias = [a for a in (resultado.get("advertencia_deteccion"),
++                                resultado.get("advertencia_tiempo"),
++                                resultado.get("advertencia_fps"),
++                                resultado.get("advertencia_componentes")) if a]
++    return {
++        "definicion": resultado.get("definicion_evento"),
++        "frame_inicio": indice,
++        "frame_confirmacion": resultado.get("frame_confirmacion_automatica"),
++        "metodo": (confirmacion or {}).get("metodo") or resultado.get("tipo_deteccion"),
++        "roi_deteccion": {
++            "bbox_norm": (zona or {}).get("bbox_norm"),
++            "fuente": (zona or {}).get("fuente"),
++            "tipo_camara": (zona or {}).get("tipo_camara"),
++        },
++        "microzona_bbox_norm": (mb.get("bbox_componente_norm")
++                                or resultado.get("bbox_componente_norm")),
++        "scores_fuentes": scores,
++        "descartes": {
++            "iluminacion_global": float(scores.get("iluminacion_global") or 0.0),
++            "abombamiento": float(scores.get("abombamiento") or 0.0),
++            "reflejo": float(scores.get("reflejo") or 0.0),
++            "movimiento_camara_px": float(scores.get("movimiento_camara_px") or 0.0),
++            "ruido_compresion": float(scores.get("ruido_compresion") or 0.0),
++        },
++        "reloj": {
++            "tiempo_ms": resultado.get("tiempo_ms"),
++            "tiempo_fps_ms": resultado.get("tiempo_fps_ms"),
++            "fuente_tiempo": resultado.get("fuente_tiempo"),
++            "fps": resultado.get("fps"),
++            "resolucion_nativa_ms": resultado.get("resolucion_nativa_ms"),
++            "overlay_validado": resultado.get("overlay_validado"),
++        },
++        "calidad": {
++            "confianza": resultado.get("confianza"),
++            "score_apertura": resultado.get("score_apertura"),
++            "antes_limpio": resultado.get("antes_limpio"),
++            "inicio_en_borde_baseline": resultado.get("inicio_en_borde_baseline"),
++            "evento_al_inicio": bool(deteccion_inicio.get("evento_al_inicio")),
++            "evidencia_baseline": deteccion_inicio.get("evidencia_baseline") or [],
++        },
++        "advertencias": advertencias,
++    }
++
++
+ def analizar_video(ruta_video: str | Path, config: dict | None = None, *, usar_cache: bool = True) -> dict:
+     """Detecta el primer cuadro visible del airbag y lo valida con cuadros futuros."""
+     ruta = Path(ruta_video).resolve()
+@@ -1463,6 +1580,12 @@ def analizar_video(ruta_video: str | Path, config: dict | None = None, *, usar_c
+     cap.release()
+     frames_leidos = len(scores)
+     total_frames = max(frames_leidos, frames_decl) if detenido_en is not None else frames_leidos
++    # V15.9: los cuadros de referencia también se auditan. Si el baseline ya
++    # muestra la bolsa, el nacimiento es anterior al clip: incertidumbre
++    # explícita (evento_al_inicio), nunca un origen inventado en el frame 0.
++    deteccion_inicio = (_baseline_contiene_evento(frames_base, cfg_det) if len(frames_base) >= 2
++                        else {"evento_al_inicio": False, "evidencia_baseline": []})
++    evento_al_inicio = bool(deteccion_inicio.get("evento_al_inicio"))
+     if frames_leidos <= nbase_obj:
+         return {"ruta": str(ruta), "nombre": ruta.name, "estado": "error",
+                 "error": "El video contiene muy pocos cuadros para analizar.", "firma": firma,
+@@ -1514,7 +1637,9 @@ def analizar_video(ruta_video: str | Path, config: dict | None = None, *, usar_c
+ 
+     if candidato is None:
+         resultado = {"ruta": str(ruta), "nombre": ruta.name, "firma": firma,
+-                     "estado": "sin_evento", "fps": fps_temporal_pre,
++                     "estado": "sin_evento",
++                     "estado_evento": "evento_al_inicio" if evento_al_inicio else "sin_evento",
++                     "fps": fps_temporal_pre,
+                      "fps_archivo": fps_archivo,
+                      "fps_grabacion": (float(fps_rec_inicial) if fps_rec_inicial else None),
+                      "fps_fuente": ("overlay_rec" if fps_rec_inicial else "archivo"),
+@@ -1529,6 +1654,15 @@ def analizar_video(ruta_video: str | Path, config: dict | None = None, *, usar_c
+                      "tipo_camara": zona_aprendida.get("tipo_camara"),
+                      "baseline_frames": nbase_obj,
+                      "perfil_evento_aprendido": perfil_evento}
++        if evento_al_inicio:
++            # Apertura visible desde el primer cuadro: se marca y se conserva el
++            # primer indicio, pero no se afirma que el frame 0 sea el nacimiento
++            # exacto (tiempo_ms queda vacío y sólo hay tiempo sospechoso).
++            resultado["estado"] = "evento_al_inicio"
++            resultado["frame_evento"] = 0
++            resultado["frame_evento_confiable"] = False
++            resultado["tiempo_ms"] = None
++            resultado["tiempo_ms_sospechoso"] = 0.0
+     else:
+         actual = scores[candidato]
+         mb = ((confirmacion or {}).get("metricas_inicio") or
+@@ -1558,7 +1692,15 @@ def analizar_video(ruta_video: str | Path, config: dict | None = None, *, usar_c
+             finally:
+                 cap2.release()
+         advertencia_deteccion = None
+-        if (confirmacion or {}).get("inicio_en_borde_baseline"):
++        if evento_al_inicio:
++            # V15.9: el baseline ya muestra la bolsa. No se fija un nacimiento
++            # artificial: queda incertidumbre explícita y revisión humana.
++            confianza = min(confianza, 0.5)
++            advertencia_deteccion = (
++                "Los cuadros de referencia ya muestran evidencia de despliegue: "
++                "el nacimiento es anterior al vídeo. Revisa el clip completo; "
++                "no se asigna un tiempo de apertura automático.")
++        elif (confirmacion or {}).get("inicio_en_borde_baseline"):
+             # La bolsa ya podría verse dentro de los cuadros de referencia.
+             confianza = min(confianza, 0.6)
+             advertencia_deteccion = (
+@@ -1599,7 +1741,11 @@ def analizar_video(ruta_video: str | Path, config: dict | None = None, *, usar_c
+             offset_overlay = float(tiempo_overlay) - float(tiempo_fps)
+         resultado = {
+             "ruta": str(ruta), "nombre": ruta.name, "firma": firma,
+-            "estado": "candidato", "fps": fps_temporal,
++            "estado": ("evento_al_inicio" if evento_al_inicio else "candidato"),
++            "estado_evento": ("evento_al_inicio" if evento_al_inicio else
++                              "propuesto" if tipo_deteccion != "primer_blanco_nuevo"
++                              else "confirmado"),
++            "fps": fps_temporal,
+             "fps_archivo": fps_archivo, "fps_grabacion": fps_grabacion,
+             "fps_fuente": ("reloj_overlay" if control_fps.get("corregido") else
+                            "overlay_rec" if fps_grabacion else "archivo"),
+@@ -1608,13 +1754,17 @@ def analizar_video(ruta_video: str | Path, config: dict | None = None, *, usar_c
+             "advertencia_fps": control_fps.get("advertencia"),
+             "total_frames": total_frames, "ancho": ancho, "alto": alto,
+             "frame_evento": int(candidato),
++            "frame_evento_confiable": not evento_al_inicio,
++            "tiempo_ms_sospechoso": (None if tiempo is None or not evento_al_inicio
++                                     else round(float(tiempo), 1)),
+             "frame_confirmacion_automatica": int((confirmacion or {}).get("frame_confirmacion", candidato)),
+             "retroceso_frames": int((confirmacion or {}).get("retroceso_frames", 0)),
+             "crecimiento_ratio": round(crecimiento, 4),
+             "metodo_confirmacion": (confirmacion or {}).get("metodo"),
+             "score_evento": round(float(actual), 4), "umbral": round(float(umbral), 4),
+             "score_apertura": round(float(score_apertura), 4),
+-            "tiempo_ms": None if tiempo is None else round(float(tiempo), 1),
++            "tiempo_ms": (None if tiempo is None or evento_al_inicio
++                          else round(float(tiempo), 1)),
+             "tiempo_fps_ms": None if tiempo_fps is None else round(float(tiempo_fps), 3),
+             "tiempo_subframe_estimado_ms": None,
+             "tiempo_overlay_ms": tiempo_overlay, "fuente_tiempo": fuente,
+@@ -1649,11 +1799,17 @@ def analizar_video(ruta_video: str | Path, config: dict | None = None, *, usar_c
+             "pixeles_sin_compensar": int(mb.get("pixeles_sin_compensar") or 0),
+         }
+     resultado["ruido_baseline"] = ruido_base
++    resultado.setdefault("estado_evento",
++                         "evento_al_inicio" if evento_al_inicio else "sin_evento")
++    resultado["evento_al_inicio"] = evento_al_inicio
++    resultado["evidencia_baseline"] = deteccion_inicio.get("evidencia_baseline") or []
++    resultado["definicion_evento"] = "Primer contorno visible de ruptura corroborado; no abombamiento."
++    resultado["razones_evento"] = _razones_evento(
++        resultado, metricas_blanco, confirmacion, zona_aprendida, deteccion_inicio)
+     resultado["compensacion_movimiento"] = bool(cfg.get("compensar_movimiento", True))
+     resultado["analisis_resolucion_nativa"] = bool(cfg.get("analisis_resolucion_nativa", True))
+     resultado["requiere_revision"] = True
+     resultado["validado_con_videos_reales"] = False
+-    resultado["definicion_evento"] = "Primer contorno visible de ruptura corroborado; no abombamiento."
+     resultado["parametros_ruptura"] = {
+         "incremento_minimo": int(cfg_det.get("umbral_incremento_blanco", 18)),
+         "discontinuidad_local_minima": float(cfg_det.get("umbral_discontinuidad_nueva", 6.0)),
+@@ -1778,9 +1934,27 @@ def consenso_videos(items: Iterable[dict], config: dict | None = None) -> dict:
+                       "requiere_revision": bool(item.get("requiere_revision")) and not manual})
+     vacio = {"tiempo_ms": None, "soporte": 0, "total_validos": len(datos),
+              "requiere_revision": True, "calibracion_overlay_ms": None,
+-             "regla": "primera_aparicion", "camaras_excluidas": sorted(excluidas)}
++             "regla": "primera_aparicion", "camaras_excluidas": sorted(excluidas),
++             "primer_instante_por_camara": [], "incidencias": [],
++             "tiempo_propuesto_ms": None, "soporte_requerido": min_camaras,
++             "apertura_revelada": bool(datos),
++             "motivo_revision": ["No hay detecciones confiables en las cámaras del caso."]}
+     if not datos:
+-        return {"estado": "sin_datos", **vacio}
++        base = {"estado": "sin_datos",
++                "estado_consenso": ("sin_datos" if not items else "sin_evento"), **vacio}
++        base["primer_instante_por_camara"] = [
++            {"camara": _camara_item(x), "video": x.get("nombre"), "tiempo_ms": None,
++             "fuente": x.get("fuente_tiempo"), "resolucion_ms": None, "manual": False,
++             "requiere_revision": bool(x.get("evento_al_inicio")), "en_consenso": False,
++             "estado": ("evento_al_inicio" if x.get("evento_al_inicio")
++                        or x.get("estado") == "evento_al_inicio" else
++                        ("sin_evento" if x.get("estado") in {"no_event", "omitido"} else "sin_datos")),
++             "tiempo_ms_sospechoso": x.get("tiempo_ms_sospechoso")}
++            for x in items]
++        if any(p["estado"] == "evento_al_inicio" for p in base["primer_instante_por_camara"]):
++            base["estado_consenso"] = "propuesto"
++            base["motivo_revision"] = ["El evento está al inicio del video; falta la evidencia previa."]
++        return base
+     principales = [x for x in datos if x["principal"]]
+     usa_excluidas = not principales
+     pool = principales or datos
+@@ -1793,21 +1967,38 @@ def consenso_videos(items: Iterable[dict], config: dict | None = None) -> dict:
+     def _soporte(x: dict) -> list[dict]:
+         return [y for y in pool if abs(y["valor"] - x["valor"]) <= _tolerancia(x)]
+ 
+-    necesario = min(min_camaras, len(pool))
++    # V15.9 (reconciliación 3-de-4): con cuatro cámaras comparables el modo
++    # automático confirmable exige respaldo de 3; con menos cámaras disponibles
++    # se admite el video faltante y se exige el mínimo configurado (2). Cualquier
++    # caso por debajo del respaldo queda «propuesto» (pendiente de revisión),
++    # conservando la primera evidencia y todas las cámaras originales. Las
++    # cámaras comparables incluyen las que analizaron sin detectar evento.
++    comparables = max(len(pool), len([x for x in items
++                                      if _camara_item(x) not in excluidas
++                                      and x.get("estado") != "error"]))
++    soporte_requerido = 3 if comparables >= 4 else min(min_camaras, max(1, comparables))
++    vacio["soporte_requerido"] = soporte_requerido
+     anterior_sin_respaldo = None
+     if manuales:
+         primero = min(manuales, key=lambda x: x["valor"])
+         estado = "confirmado_manual"
++        estado_consenso = "confirmado"
+     else:
+-        # La cámara más temprana que otra cámara principal respalda (±1 cuadro).
+-        # Una detección aislada aún más temprana no se descarta en silencio:
+-        # se informa para que el usuario la revise.
++        # La cámara más temprana con respaldo suficiente (±1 cuadro). Una
++        # detección aislada aún más temprana no se descarta en silencio: se
++        # informa para que el usuario la revise.
+         ordenados = sorted(pool, key=lambda x: x["valor"])
+-        primero = next((x for x in ordenados if len(_soporte(x)) >= necesario), None)
++        primero = next((x for x in ordenados if len(_soporte(x)) >= soporte_requerido), None)
+         if primero is None:
+             primero, estado = ordenados[0], "sin_consenso"
++            tol_cluster = max([_tolerancia(x) for x in ordenados], default=tol_base)
++            valores = [x["valor"] for x in ordenados]
++            clusters = 1 + sum(1 for i in range(1, len(valores))
++                               if valores[i] - valores[i - 1] > max(tol_cluster, 1e-6))
++            estado_consenso = "discordancia" if clusters >= 2 else "propuesto"
+         else:
+             estado = "primera_aparicion"
++            estado_consenso = "propuesto"
+             previo = ordenados[0]
+             if previo["valor"] < primero["valor"] - _tolerancia(primero):
+                 anterior_sin_respaldo = {"video": previo["nombre"], "camara": previo["camara"],
+@@ -1817,12 +2008,84 @@ def consenso_videos(items: Iterable[dict], config: dict | None = None) -> dict:
+     if usa_excluidas and estado != "confirmado_manual":
+         # Sólo hay vista trasera: no basta para fijar el tiempo automáticamente.
+         estado = "sin_consenso"
++        estado_consenso = "propuesto"
++    # Confirmable automático: respaldo de 3+ cámaras limpio, sin detección
++    # anterior sin respaldo y sin mezclarse con vistas excluidas.
++    if (estado == "primera_aparicion" and len(soporte_items) >= 3
++            and len(soporte_items) >= soporte_requerido
++            and anterior_sin_respaldo is None and not usa_excluidas):
++        estado_consenso = "confirmado"
+     precision_sustentada = all(x["resolucion"] <= 0.2000001 for x in soporte_items)
+-    requiere_revision = estado != "confirmado_manual" and (
+-        estado == "sin_consenso" or anterior_sin_respaldo is not None or
+-        any(x["requiere_revision"] for x in soporte_items))
++    if estado == "confirmado_manual":
++        requiere_revision = False
++    elif estado_consenso == "confirmado":
++        # 3+ cámaras comparables de acuerdo: el resultado consolidado del caso
++        # es confirmable sin revisión humana (la evidencia por cámara queda).
++        requiere_revision = False
++    else:
++        requiere_revision = True
++    if estado != "confirmado_manual" and any(x["requiere_revision"] for x in soporte_items) \
++            and estado_consenso != "confirmado":
++        requiere_revision = True
++    # Salidas separadas (Fase 5): primer instante visible confiable por cámara
++    # y resultado consolidado del caso. Todas las cámaras aparecen aunque no
++    # hayan detectado (sin_evento / evento_al_inicio / sin_datos).
++    primer_instante = []
++    for item in items:
++        nombre = item.get("nombre")
++        dato = next((x for x in datos if x["nombre"] == nombre), None)
++        if dato is None:
++            estado_item = ("evento_al_inicio" if item.get("evento_al_inicio")
++                           or item.get("estado") == "evento_al_inicio" else
++                           ("sin_evento" if item.get("estado") in {"no_event", "omitido"}
++                            else "sin_datos"))
++            primer_instante.append({
++                "camara": _camara_item(item), "video": nombre, "tiempo_ms": None,
++                "fuente": item.get("fuente_tiempo"), "resolucion_ms": None,
++                "manual": False, "requiere_revision": estado_item != "sin_evento",
++                "en_consenso": False, "estado": estado_item,
++                "tiempo_ms_sospechoso": item.get("tiempo_ms_sospechoso"),
++            })
++            continue
++        en = any(dato is y for y in soporte_items)
++        if dato["manual"]:
++            estado_item = "confirmado_manual"
++        elif en and estado_consenso == "confirmado":
++            estado_item = "confirmado"
++        elif en:
++            estado_item = "propuesto"
++        else:
++            estado_item = "discordancia"
++        primer_instante.append({
++            "camara": dato["camara"], "video": dato["nombre"],
++            "tiempo_ms": round(dato["valor"], 3),
++            "fuente": dato["fuente"], "resolucion_ms": round(dato["resolucion"], 6),
++            "manual": bool(dato["manual"]), "requiere_revision": bool(dato["requiere_revision"]),
++            "en_consenso": en, "estado": estado_item,
++        })
++    incidencias = []
++    for item in items:
++        for clave in ("advertencia_fps", "advertencia_tiempo", "advertencia_deteccion",
++                      "overlay_error"):
++            if item.get(clave):
++                incidencias.append({"video": item.get("nombre"), "detalle": item.get(clave)})
++    motivo_revision = []
++    if anterior_sin_respaldo:
++        motivo_revision.append("Hay una detección anterior sin respaldo suficiente.")
++    if usa_excluidas and estado != "confirmado_manual":
++        motivo_revision.append("Sólo las vistas excluidas registraron el evento.")
++    if estado_consenso == "discordancia":
++        motivo_revision.append("Las cámaras no coinciden en un mismo primer instante.")
++    elif estado_consenso == "propuesto" and estado != "confirmado_manual":
++        motivo_revision.append("Falta respaldo suficiente para confirmar automáticamente.")
++    if any(x["requiere_revision"] for x in soporte_items):
++        motivo_revision.append("Alguna cámara del consenso quedó marcada para revisión.")
+     return {
+         "estado": estado, "tiempo_ms": round(float(primero["valor"]), 1),
++        "estado_consenso": estado_consenso,
++        "soporte_requerido": soporte_requerido,
++        "apertura_revelada": bool(datos),
++        "motivo_revision": motivo_revision,
+         "regla": "primera_aparicion",
+         "camara_referencia": primero["camara"], "video_referencia": primero["nombre"],
+         "fuente_referencia": primero["fuente"],
+@@ -1833,6 +2096,10 @@ def consenso_videos(items: Iterable[dict], config: dict | None = None) -> dict:
+         "valores_coincidentes_ms": [round(x["valor"], 3) for x in soporte_items],
+         "fuentes_coincidentes": [x["fuente"] for x in soporte_items],
+         "valores_por_camara": {str(x["camara"] or x["nombre"]): round(x["valor"], 3) for x in datos},
++        "primer_instante_por_camara": primer_instante,
++        "incidencias": incidencias,
++        "tiempo_propuesto_ms": (round(float(primero["valor"]), 1)
++                                if estado == "sin_consenso" else None),
+         "tolerancia_ms": round(tolerancia, 4),
+         "calibracion_overlay_ms": None if offset_overlay is None else round(float(offset_overlay), 3),
+         "camara_anterior_sin_respaldo": anterior_sin_respaldo,
