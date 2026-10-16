@@ -1,0 +1,21 @@
+=== R15.2 P0 — EVIDENCIA RED (CRÍTICO-01 + CRÍTICO-02 auditoría R15.1) ===
+Fecha: 2026-10-15T19:54:14+00:00
+Commit base: 17f830d
+
+Stub _migrar_consensos_video retirado de test_v15_10_1_r15_1_documento_global.py (punto ciego señalado por el auditor): sus 9 pruebas siguen verdes sin stub.
+
+$ PYTHONPATH=. python -m pytest pruebas/test_v15_10_1_r152_documento_unico.py pruebas/test_v15_10_1_r15_1_documento_global.py -q
+pruebas/test_v15_10_1_r152_documento_unico.py:245: AssertionError
+=========================== short test summary info ============================
+FAILED pruebas/test_v15_10_1_r152_documento_unico.py::test_migracion_consensos_no_pierde_commit_concurrente
+FAILED pruebas/test_v15_10_1_r152_documento_unico.py::test_autoridad_compartida_existe_y_backend_delega
+FAILED pruebas/test_v15_10_1_r152_documento_unico.py::test_pipeline_preserva_revision_documento
+FAILED pruebas/test_v15_10_1_r152_documento_unico.py::test_pipeline_escribe_bajo_lock_compartido
+FAILED pruebas/test_v15_10_1_r152_documento_unico.py::test_guard_estatico_escritura_unica_del_documento
+FAILED pruebas/test_v15_10_1_r152_documento_unico.py::test_mutaciones_rechazadas_durante_pipeline[llamada0]
+FAILED pruebas/test_v15_10_1_r152_documento_unico.py::test_mutaciones_rechazadas_durante_pipeline[llamada1]
+FAILED pruebas/test_v15_10_1_r152_documento_unico.py::test_mutaciones_rechazadas_durante_pipeline[llamada2]
+FAILED pruebas/test_v15_10_1_r152_documento_unico.py::test_mutaciones_rechazadas_durante_pipeline[llamada3]
+FAILED pruebas/test_v15_10_1_r152_documento_unico.py::test_mutaciones_rechazadas_durante_pipeline[llamada4]
+FAILED pruebas/test_v15_10_1_r152_documento_unico.py::test_mutaciones_rechazadas_durante_pipeline[llamada6]
+11 failed, 14 passed in 0.82s

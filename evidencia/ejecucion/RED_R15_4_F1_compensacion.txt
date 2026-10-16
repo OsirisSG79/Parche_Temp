@@ -1,0 +1,18 @@
+=== RED R15.4 F1 — compensación multi-almacén (HIGH-01) ===
+Árbol: R15.3 final (fcc5bfc) + test nuevo, SIN corrección
+Fecha: 2026-10-16 02:22 UTC
+
+>           raise EscrituraFallida(str(getattr(resultado, "error", None)
+                                       or "escritura no verificada"))
+E           utilidades.persistencia_documento.EscrituraFallida: escritura no verificada
+
+utilidades/persistencia_documento.py:157: EscrituraFallida
+=========================== short test summary info ============================
+FAILED pruebas/test_v15_10_1_r154_compensacion_multialmacen.py::test_sin_datos_fallo_commit_restaura_sqlite_y_503
+FAILED pruebas/test_v15_10_1_r154_compensacion_multialmacen.py::test_sin_datos_fallo_commit_restaura_marca_previa
+FAILED pruebas/test_v15_10_1_r154_compensacion_multialmacen.py::test_ocr_fallo_commit_no_deja_correcciones_ni_muestras
+FAILED pruebas/test_v15_10_1_r154_compensacion_multialmacen.py::test_video_fallo_commit_restaura_revision_durable
+FAILED pruebas/test_v15_10_1_r154_compensacion_multialmacen.py::test_video_fallo_commit_restaura_revision_previa
+FAILED pruebas/test_v15_10_1_r154_compensacion_multialmacen.py::test_aprender_zona_fallo_commit_devuelve_503
+FAILED pruebas/test_v15_10_1_r154_compensacion_multialmacen.py::test_campo_manual_fallo_commit_503
+7 failed, 1 passed in 2.74s

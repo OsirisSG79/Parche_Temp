@@ -1,0 +1,12 @@
+E       AttributeError: module 'dashboard.backend.app' has no attribute '_datos_mutacion_lock'
+
+pruebas/test_v15_10_1_r15_revisiones.py:304: AttributeError
+=========================== short test summary info ============================
+FAILED pruebas/test_v15_10_1_r15_revisiones.py::test_revision_bloqueada_con_pipeline_activo
+FAILED pruebas/test_v15_10_1_r15_revisiones.py::test_zonas_bloqueadas_con_reserva_de_pipeline
+FAILED pruebas/test_v15_10_1_r15_revisiones.py::test_revision_bloqueada_con_reanalisis_activo
+FAILED pruebas/test_v15_10_1_r15_revisiones.py::test_revision_completada_bloquea_ediciones_de_video
+FAILED pruebas/test_v15_10_1_r15_revisiones.py::test_expected_revision_antigua_devuelve_409
+FAILED pruebas/test_v15_10_1_r15_revisiones.py::test_detalle_expone_revision_documento
+FAILED pruebas/test_v15_10_1_r15_revisiones.py::test_edicion_manual_durante_reanalisis_sobrevive
+7 failed in 0.55s

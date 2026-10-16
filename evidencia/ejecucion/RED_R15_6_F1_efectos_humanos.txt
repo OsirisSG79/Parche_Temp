@@ -1,0 +1,13 @@
+=== RED R15.6 F1 — efectos humanos fuera del coordinador (CRÍTICO-01 + MEDIO-06) ===
+Fecha: 2026-10-16 17:35 UTC · HEAD: e06586a
+
+
+pruebas/test_v15_10_1_r156_efectos_humanos.py:38: RuntimeError
+=========================== short test summary info ============================
+FAILED pruebas/test_v15_10_1_r156_efectos_humanos.py::test_no_texto_fallo_revision_cero_efectos
+FAILED pruebas/test_v15_10_1_r156_efectos_humanos.py::test_no_texto_lote_segundo_fallo_restaura_primero
+FAILED pruebas/test_v15_10_1_r156_efectos_humanos.py::test_anotar_region_fallo_revision_cero_efectos
+FAILED pruebas/test_v15_10_1_r156_efectos_humanos.py::test_corregir_campo_fallo_revision_no_toca_documento
+FAILED pruebas/test_v15_10_1_r156_efectos_humanos.py::test_corregir_externa_fallo_revision_cero_efectos
+FAILED pruebas/test_v15_10_1_r156_efectos_humanos.py::test_anotar_externa_fallo_revision_cero_efectos
+6 failed, 2 passed in 1.54s

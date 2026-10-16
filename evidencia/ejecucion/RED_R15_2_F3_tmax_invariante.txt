@@ -1,0 +1,18 @@
+=== R15.2 F3 — EVIDENCIA RED (ALTO-03 invariante física Tmax) ===
+Fecha: 2026-10-15 · Commit base: a21f42e (antes de la corrección)
+Archivo nuevo: pruebas/test_v15_10_1_r152_tmax_invariante.py
+
+$ PYTHONPATH=. python -m pytest pruebas/test_v15_10_1_r152_tmax_invariante.py -q
+FAILED test_senal_plana_con_breakout_intermedio_no_confirma_cero_ms[1]
+FAILED test_senal_plana_con_breakout_intermedio_no_confirma_cero_ms[5]
+FAILED test_senal_plana_con_breakout_intermedio_no_confirma_cero_ms[20]
+FAILED test_casi_plana_con_ruido_de_un_pixel_no_confirma_cero_ms
+FAILED test_breakout_cerca_del_final_plano_no_confirma
+FAILED test_expansion_real_sin_fps_no_puede_confirmar_milisegundos
+FAILED test_invariante_global_fuzz
+7 failed, 1 passed in 0.20s
+
+Reproducción directa del defecto (señal plana 100 frames, breakout 5, fps 1000):
+  estado=maximo_inflado_estimado  frame_breakout=5  frame_max_inflado=5
+  duracion_expansion_ms=0.0  anomalías=[]
+→ «confirmado» con 0 ms de expansión: exactamente el hallazgo ALTO-03.

@@ -1,0 +1,14 @@
+=== RED R15.4 F3 — checkpoint histórico como resultado actual (MEDIUM-03) ===
+Árbol: 62b394e (F2) + test nuevo, SIN corrección
+Fecha: 2026-10-16 02:45 UTC
+
+pruebas/test_v15_10_1_r154_checkpoint_seguro.py:90: KeyError
+=========================== short test summary info ============================
+FAILED pruebas/test_v15_10_1_r154_checkpoint_seguro.py::test_checkpoint_completado_sin_documento_no_muestra_parciales
+FAILED pruebas/test_v15_10_1_r154_checkpoint_seguro.py::test_checkpoint_en_curso_permite_parciales_con_fuente[procesando]
+FAILED pruebas/test_v15_10_1_r154_checkpoint_seguro.py::test_checkpoint_en_curso_permite_parciales_con_fuente[pausado]
+FAILED pruebas/test_v15_10_1_r154_checkpoint_seguro.py::test_checkpoint_en_curso_permite_parciales_con_fuente[reanudando]
+FAILED pruebas/test_v15_10_1_r154_checkpoint_seguro.py::test_checkpoint_en_curso_permite_parciales_con_fuente[detenido_con_avance]
+FAILED pruebas/test_v15_10_1_r154_checkpoint_seguro.py::test_documento_presente_fuente_documento
+FAILED pruebas/test_v15_10_1_r154_checkpoint_seguro.py::test_documento_presente_ignora_parciales_de_corrida_finalizada
+7 failed, 1 passed in 0.55s

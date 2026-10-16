@@ -1,0 +1,23 @@
+=== R15.3 F3 — EVIDENCIA RED (ALTO-04 + P2 confianza) ===
+Fecha: 2026-10-15T22:19:53+00:00 · Base: 70762d4 (R15.3 F2)
+
+Reproducción del auditor ANTES del fix (área 10000 px en breakout, 10001 px
+después — incremento de 1 px = 0.01 %, fps 1000):
+ breakout 1 → estado= maximo_inflado_estimado frame_max= 2 dur= 1.0 confianza= 1.0 anomalías= []
+ breakout 5 → estado= maximo_inflado_estimado frame_max= 6 dur= 1.0 confianza= 1.0 anomalías= []
+ breakout 20 → estado= maximo_inflado_estimado frame_max= 21 dur= 1.0 confianza= 1.0 anomalías= []
+
+$ PYTHONPATH=pruebas:. python -m pytest pruebas/test_v15_10_1_r153_tmax_magnitud.py -q
+pruebas/test_v15_10_1_r153_tmax_magnitud.py:212: AssertionError
+=========================== short test summary info ============================
+FAILED pruebas/test_v15_10_1_r153_tmax_magnitud.py::test_un_pixel_no_es_expansion_real[1]
+FAILED pruebas/test_v15_10_1_r153_tmax_magnitud.py::test_un_pixel_no_es_expansion_real[5]
+FAILED pruebas/test_v15_10_1_r153_tmax_magnitud.py::test_un_pixel_no_es_expansion_real[20]
+FAILED pruebas/test_v15_10_1_r153_tmax_magnitud.py::test_crecimiento_relativo_insuficiente
+FAILED pruebas/test_v15_10_1_r153_tmax_magnitud.py::test_piso_absoluto_en_areas_pequenas
+FAILED pruebas/test_v15_10_1_r153_tmax_magnitud.py::test_expansion_breve_sin_persistencia
+FAILED pruebas/test_v15_10_1_r153_tmax_magnitud.py::test_confianza_coherente_senal_plana
+FAILED pruebas/test_v15_10_1_r153_tmax_magnitud.py::test_confianza_limitada_en_todos_los_no_confirmados
+FAILED pruebas/test_v15_10_1_r153_tmax_magnitud.py::test_umbrales_documentados
+FAILED pruebas/test_v15_10_1_r153_tmax_magnitud.py::test_fuzz_invariante_magnitud_global
+10 failed, 1 passed in 0.22s

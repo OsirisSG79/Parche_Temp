@@ -1,0 +1,13 @@
+=== SIM R15.5 C — upgrade R15.4 → R15.5 ===
+Fecha: 2026-10-16 16:03 UTC
+Base: 69b1900 + payload R15.4 (desde ZIP oficial, verificado SHA-256) + Relocate + payload R15.5 + Relocate (como el instalador acumulado)
+
+payload R15.4 copiado y verificado: 123 archivos
+Relocate-LegacyRootDocs (tras R15.4): ['README_R14.md raíz retirado (idéntico a docs/informes)']
+payload R15.5 copiado y verificado: 130 archivos
+Relocate-LegacyRootDocs (tras R15.5): sin legacy
+VERSION.txt=15.10.1-r15.5
+PATCH_BUILD en app.py: True
+cache-busting index (v=15.10.1-r15.5): 5
+pytest: 994 passed, 26 skipped, 1 warning in 153.66s (0:02:33)
+node: 38/38

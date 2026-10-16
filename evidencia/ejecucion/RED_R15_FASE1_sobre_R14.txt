@@ -1,0 +1,19 @@
+# EVIDENCIA ROJO · R15 Fase 1 (concurrencia) sobre línea base R14 congelada (commit 3d82a75)
+# Fecha: 2026-10-15 14:18 UTC · Python 3.13.16
+# Reproducción de CRIT-01, ALTA-02, MEDIA-15 y pruebas obligatorias 1-4/8 de la auditoría R14.
+$ PYTHONPATH=. python -m pytest pruebas/test_v15_10_1_r15_concurrencia.py -q
+E           Failed: DID NOT RAISE <class 'fastapi.exceptions.HTTPException'>
+
+pruebas/test_v15_10_1_r15_concurrencia.py:305: Failed
+=========================== short test summary info ============================
+FAILED pruebas/test_v15_10_1_r15_concurrencia.py::test_pipelines_simultaneos_un_solo_worker[2]
+FAILED pruebas/test_v15_10_1_r15_concurrencia.py::test_pipelines_simultaneos_un_solo_worker[5]
+FAILED pruebas/test_v15_10_1_r15_concurrencia.py::test_pipelines_simultaneos_un_solo_worker[10]
+FAILED pruebas/test_v15_10_1_r15_concurrencia.py::test_pipeline_y_reproceso_simultaneos_un_solo_worker
+FAILED pruebas/test_v15_10_1_r15_concurrencia.py::test_fallo_thread_start_deja_estado_seguro_y_slot_libre
+FAILED pruebas/test_v15_10_1_r15_concurrencia.py::test_reproceso_rechazado_no_guarda_roi
+FAILED pruebas/test_v15_10_1_r15_concurrencia.py::test_inicio_rechazado_no_registra_proyecto
+FAILED pruebas/test_v15_10_1_r15_concurrencia.py::test_reanalisis_activo_bloquea_inicio_de_pipeline
+FAILED pruebas/test_v15_10_1_r15_concurrencia.py::test_pipeline_reservado_bloquea_reanalisis
+9 failed, 1 passed in 2.44s
+# Nota: test_dos_reprocesos_simultaneos pasa por azar en la base (ventana estrecha sin checkpoint persistente); la auditoría lo reprodujo ensanchando la ventana.

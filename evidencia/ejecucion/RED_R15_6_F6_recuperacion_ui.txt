@@ -1,0 +1,9 @@
+=== RED R15.6 F6 — UI de recuperación ausente (MEDIO-05, flujo público) ===
+Fecha: 2026-10-16 19:00 UTC · HEAD: a50512f
+
+node:internal/assert/utils:281
+    throw err;
+    ^
+
+AssertionError [ERR_ASSERTION]: debe existir el componente EstadoRecuperacion
+    at Object.<anonymous> (/home/user/r15-repo/pruebas/test_v15_10_1_r156_recuperacion_ui.cjs:11:1)

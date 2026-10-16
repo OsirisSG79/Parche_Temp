@@ -1,0 +1,41 @@
+== EVIDENCIA GREEN — R15 Fase 8a (alineación de 13 pruebas obsoletas V15.9) ==
+Fecha: 2026-10-15T15:54:02+00:00
+
+Suite completa: 860 passed / 0 failed / 0 skipped (103.7 s)
+Baseline R14 era 792/14/1; tras Fases 1-7b era 847/13/0.
+
+Criterio aplicado (nunca verdear en silencio): cada prueba alineada lleva
+docstring SUPERSEDE citando la doctrina que reemplazó su contrato:
+ - PLAN_CORRECCION_R13 §Semáforo (gris=abstención: sin tiempo defendible,
+   conflicto o referencia insuficiente)
+ - PLAN_CORRECCION_R10 reglas 8-9 (abstención gris; publicación más estricta)
+ - RESULTADOS_PRUEBAS_V15_9 («la confirmación humana nunca se reemplaza
+   por un consenso automático»)
+ - Plan R15 del usuario («no inventar certeza»; caso B: sin breakout ⇒
+   NO DETECTADO, nunca 0 ms; cero pérdida de datos manuales)
+
+Pruebas alineadas (13):
+ 1. test_matriz_dashboard_apertura_y_gris_desconocido — colores sólo con
+    confirmación humana (VERIFICADO_HUMANO); sin evidencia ⇒ gris.
+ 2-3. test_reporte_bmg_combina_1st_2st_y_colorea_apertura +
+    test_tiempo_en_conflicto_se_muestra_gris — resumen DINÁMICO (fila 7/
+    bloque 2ST), no posiciones fijas D16/G42; caso() gana manual=True.
+ 4-7. test_reporte_tiempos_video (multilingüe ×3 + candidato_maximo) —
+    revisión humana del fixture con referencia temporal validada (58→5.8ms
+    coherente con campo «5,8 ms»); sin referencia ⇒ PROPUESTA no publicada.
+ 8. test_r7_excel_limpia_ids... — colores con manual=True; títulos/IDs sin
+    cambio.
+ 9. test_no_devuelve_negativos — raw negativo CONSERVADO (tiempo_crudo_ms),
+    clave publicable retirada + NO_POSITIVO + motivo; sin clamp a 0.
+10. test_revision_negativa_guardada_se_repara — ya no se reescribe a 2.0:
+    conserva -122.8, NO_POSITIVO, sin tiempo_reparado.
+11. test_revision_con_8_fps_se_repara — ya no se recalcula a 2.2: conserva
+    1375.0, REFERENCIA_INVALIDA, «se conserva para revisión manual».
+12. test_confirmacion_coherente_no_se_reescribe — subset-check: enriquecido
+    con raw_time_ms/estado_tiempo VALIDO sin alterar datos humanos.
+13. test_nunca_negativo (consenso frame 0) — tiempo_ms None + sin_datos +
+    sin_evento + requiere_revision; nunca 0 ms fabricado.
+
+Cero cambios de código de producto en esta fase: los 13 fallos eran
+contratos reemplazados por doctrina R9-R13, no bugs (triage verificado
+ejecutando el comportamiento real antes de alinear cada aserción).

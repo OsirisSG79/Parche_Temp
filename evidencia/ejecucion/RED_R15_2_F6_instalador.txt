@@ -1,0 +1,18 @@
+=== R15.2 F6 — EVIDENCIA RED (MEDIO/BAJO-06 instalador + identidad r15.2) ===
+Fecha: 2026-10-15 · Commit base: 050a71c (antes del rename/correcciones)
+
+$ PYTHONPATH=pruebas:. python -m pytest pruebas/test_v15_10_1_r15_4_instalador_base.py \
+    pruebas/test_v15_10_1_r15_instalador.py pruebas/test_v15_10_1_r14_auditoria_preventiva.py -q
+FAILED test_v15_10_1_r14_auditoria_preventiva.py::test_backend_publica_salud_y_persistencia_segura
+FAILED test_v15_10_1_r14_auditoria_preventiva.py::test_frontend_cache_r14
+2 failed, 5 passed, 15 skipped in 0.26s
+(15 skips = INSTALAR_R15_2.* aún no existía; al crearlos, las pruebas de
+marker-por-contenido, respaldo del marker previo y rollback del marker
+ejecutaron y pasaron — ver GREEN_R15_2_F6.)
+
+Defectos confirmados en INSTALAR_R15_1.ps1:
+1) Assert-BaseConocida aceptaba cualquier marker por EXISTENCIA:
+     if (Test-Path -LiteralPath (Join-Path $Target $m) -PathType Leaf) { return }
+   Un marker vacío/corrupto/de otro proyecto colaba como base conocida.
+2) La reinstalación sobrescribía PATCH_INSTALLED_*.json sin respaldo y el
+   rollback lo eliminaba a ciegas (pérdida de la evidencia previa).

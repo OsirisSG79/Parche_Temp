@@ -1,0 +1,26 @@
+FASE 7 R15 — VERDE (MEDIA-10 + MEDIA-11; pruebas obligatorias 15 y 16)
+Cambios:
+- utilidades/validacion_entradas.py::validar_nombre_excel:
+  * el valor CRUDO se valida antes del trim: espacio final ⇒ rechazo temprano
+    (antes 'archivo ' se convertía en silencio en 'archivo.xlsx');
+  * nombres reservados de Windows comprobados sobre el PRIMER componente
+    antes del primer punto: CON.foo.xlsx, NUL.data.xlsx, COM1.log.xlsx,
+    LPT9.test.xlsx, AUX.backup.xlsx ⇒ rechazo;
+  * variantes con superíndices COM¹/²/³ y LPT¹/²/³ incluidas.
+- utilidades/validacion_entradas.py::es_raiz_codigo_seleccionada: además de la
+  igualdad exacta, bloquea cualquier ANCESTRO de la raíz del programa (el
+  escaneo del lote es recursivo y un padre como «Programas Base» incluiría el
+  árbol de V-Matrix). Subcarpetas del programa y carpetas ajenas: sin cambio.
+- dashboard/backend/app.py: mensaje 400 del endpoint cubre el caso ancestro
+  («…o una carpeta que la contiene… elige la carpeta específica…»).
+- MEDIA-12 (preflight del instalador): BLOQUEADO — INSTALAR_R14.ps1/.bat no
+  forman parte del árbol (el payload R14 en git no incluye instaladores; el
+  test existente lo confirma con skip). Se solicitará el ZIP R14 distribuido
+  al usuario; no se inventa un instalador no verificable.
+Tests nuevos: pruebas/test_v15_10_1_r15_entradas.py (19). RED antes del fix:
+15 failed / 4 passed. Contratos R14 (test_v15_10_1_r14_auditoria_preventiva.py)
+verdes sin editar.
+Suite completa: 841 passed / 13 failed / 1 skipped (13 = obsoletos V15.9
+conocidos; cero regresiones).
+...................                                                      [100%]
+19 passed in 0.14s

@@ -1,0 +1,17 @@
+=== RED R15.6 F4 — registro fail-closed (ALTO-03) + recuperación explícita (MEDIO-05) ===
+Fecha: 2026-10-16 18:35 UTC · HEAD: 51a2e58
+
+E        +  where None = backend._modo_recuperacion
+
+pruebas/test_v15_10_1_r156_recuperacion.py:186: AssertionError
+=========================== short test summary info ============================
+FAILED pruebas/test_v15_10_1_r156_recuperacion.py::test_registro_no_escribible_bloquea_tambien_tras_reinicio
+FAILED pruebas/test_v15_10_1_r156_recuperacion.py::test_registro_corrupto_al_iniciar_activa_modo_recuperacion
+FAILED pruebas/test_v15_10_1_r156_recuperacion.py::test_modo_recuperacion_bloquea_mutaciones_gobernadas
+FAILED pruebas/test_v15_10_1_r156_recuperacion.py::test_mensaje_bloqueo_no_pide_borrado_manual
+FAILED pruebas/test_v15_10_1_r156_recuperacion.py::test_api_listar_inconsistencias
+FAILED pruebas/test_v15_10_1_r156_recuperacion.py::test_api_resolver_desbloquea_con_auditoria
+FAILED pruebas/test_v15_10_1_r156_recuperacion.py::test_api_resolver_sin_confirmacion_no_desbloquea
+FAILED pruebas/test_v15_10_1_r156_recuperacion.py::test_api_resolver_recurso_desconocido_404
+FAILED pruebas/test_v15_10_1_r156_recuperacion.py::test_api_resolver_modo_recuperacion_limpia_centinela
+9 failed, 1 passed in 0.64s

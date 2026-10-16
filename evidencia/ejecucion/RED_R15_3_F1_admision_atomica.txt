@@ -1,0 +1,34 @@
+=== R15.3 F1 — EVIDENCIA RED (CRÍTICO-01 + MEDIO-05) ===
+Fecha: 2026-10-15T21:55:59+00:00 · Base: 3d7a4ef (R15.2 + docs)
+Árbol: r15-repo sin el fix (reanalizar_videos con dos secciones de lock)
+
+$ PYTHONPATH=pruebas:. python -m pytest pruebas/test_v15_10_1_r153_admision_atomica.py -q
+            def start(self):
+                raise RuntimeError("arranque simulado fallido")
+    
+        monkeypatch.setattr(backend.threading, "Thread", ThreadFalla)
+        try:
+            with pytest.raises(HTTPException) as falla:
+>               backend.reanalizar_videos(_solicitud_reanalisis())
+
+pruebas/test_v15_10_1_r153_admision_atomica.py:315: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+dashboard/backend/app.py:5461: in reanalizar_videos
+    _video_reanalisis_hilo.start()
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <ThreadFalla(Thread-305 (reanalisis_fondo), initial daemon)>
+
+    def start(self):
+>       raise RuntimeError("arranque simulado fallido")
+E       RuntimeError: arranque simulado fallido
+
+pruebas/test_v15_10_1_r153_admision_atomica.py:310: RuntimeError
+=========================== short test summary info ============================
+FAILED pruebas/test_v15_10_1_r153_admision_atomica.py::test_ventana_forzada_doble_admision_reanalisis_pipeline
+FAILED pruebas/test_v15_10_1_r153_admision_atomica.py::test_fallo_thread_start_reanalisis_estado_seguro
+2 failed, 1 passed in 0.90s
+
+Nota: test_carrera_admision_100_iteraciones pasa incluso con código buggy
+(la ventana natural es de microsegundos); la reproducción determinista del
+interleaving del auditor (test_ventana_forzada) es la evidencia RED.

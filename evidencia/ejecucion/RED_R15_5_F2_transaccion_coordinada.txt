@@ -1,0 +1,12 @@
+=== RED R15.5 F2 — coordinador de transacción + doble fallo (P0/MEDIUM-05) ===
+Fecha: 2026-10-16 14:38 UTC · HEAD: 532fc81
+
+pruebas/test_v15_10_1_r155_transaccion_coordinada.py:186: AttributeError
+=========================== short test summary info ============================
+FAILED pruebas/test_v15_10_1_r155_transaccion_coordinada.py::test_aprender_doble_fallo_no_afirma_revertido
+FAILED pruebas/test_v15_10_1_r155_transaccion_coordinada.py::test_revisar_video_doble_fallo_declara_inconsistente
+FAILED pruebas/test_v15_10_1_r155_transaccion_coordinada.py::test_revertir_doble_fallo_declara_inconsistente
+FAILED pruebas/test_v15_10_1_r155_transaccion_coordinada.py::test_doble_fallo_bloquea_recurso_hasta_resolucion
+FAILED pruebas/test_v15_10_1_r155_transaccion_coordinada.py::test_fallo_simple_compensado_no_bloquea
+FAILED pruebas/test_v15_10_1_r155_transaccion_coordinada.py::test_exito_resuelve_inconsistencia_previa
+6 failed in 0.59s
