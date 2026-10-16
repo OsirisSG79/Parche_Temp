@@ -1,0 +1,7 @@
+=== SIM R15.4 A_instalacion_limpia ===
+Fecha: 2026-10-16 03:31 UTC
+
+Base 69b1900 (V15.9.10+R14, fresh, sin .git) + payload R15.4 (123 archivos) + Relocate-LegacyRootDocs (1): README_R14.md (retirado: copia idéntica en docs/informes)
+Identidad OK: VERSION.txt/app.py/index.html = 15.10.1-r15.4
+pytest (153s): 974 passed, 16 skipped, 1 warning in 151.32s (0:02:31)
+node: 38/38

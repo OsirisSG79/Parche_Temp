@@ -28,13 +28,19 @@ def _identidad():
 
 
 def test_r7_excel_limpia_ids_plantilla_y_usa_proyecto_y_colores(tmp_path):
+    """R15 (SUPERSEDE documentado): desde V15.10 sólo una confirmación humana
+    (VERIFICADO_HUMANO con referencia temporal validada) colorea el resumen;
+    un campo OCR ``confirmado`` sin confirmación humana queda gris por
+    abstención (PLAN_CORRECCION_R13 §Semáforo; puertas de publicación R10).
+    La intención R7 se conserva: proyecto declarado en títulos, IDs de
+    plantilla limpiados y colores verde/amarillo/rojo por criterio elegido."""
     root=Path(__file__).resolve().parents[1]
     plantilla=root/'plantillas'/'reporte_bmg_1st_2st.xlsx'
     out=tmp_path/'r7.xlsx'
     resultados=[
-        caso(900001,'1ST','HT','UGL',5.8),
-        caso(900002,'1ST','HT','OGL',6.4),
-        caso(900003,'1ST','HT','NOM',7.2),
+        caso(900001,'1ST','HT','UGL',5.8,manual=True),
+        caso(900002,'1ST','HT','OGL',6.4,manual=True),
+        caso(900003,'1ST','HT','NOM',7.2,manual=True),
     ]
     criterios={"verde_max":6.0,"amarillo_max":7.0,"origen":"elegido"}
     generar_reporte_bmg(plantilla,out,resultados,cargar_config(),cargar_reglas(),

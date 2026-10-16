@@ -176,7 +176,9 @@ test("V15.10.1 R12+: caché de estáticos sincronizada a la versión vigente", (
     version = version || m[1];
     assert.equal(m[1], version, `${recurso} no comparte la misma versión de caché`);
   }
-  assert.match(version || "", /^15\.10\.1-r(?:1[2-9]|[2-9][0-9])$/, "La caché debe ser R12 o posterior");
+  // R15.1 (SUPERSEDE documentado): el pin acepta sub-releases (r15.1) — la
+  // caché sigue al release vigente; R12+ sigue siendo el mínimo.
+  assert.match(version || "", /^15\.10\.1-r(?:1[2-9]|[2-9][0-9])(\.[0-9]+)?$/, "La caché debe ser R12 o posterior");
   assert.ok(backend.includes("no-store, no-cache, must-revalidate"), "Falta cabecera no-cache");
 });
 

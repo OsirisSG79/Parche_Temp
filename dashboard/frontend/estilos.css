@@ -1438,3 +1438,31 @@ html[data-tema="oscuro"] .logo-grafico {
   user-select: none;
   -webkit-user-select: none;
 }
+
+
+/* R15.6 (MEDIO-05): aviso de recuperación — bloqueos durables visibles. */
+.estado-recuperacion {
+  border: 2px solid #b3261e;
+  background: #fdecea;
+  color: #410e0b;
+}
+.estado-recuperacion .entrada-inconsistencia {
+  display: grid;
+  gap: 4px;
+  padding: 6px 0;
+  border-top: 1px solid rgba(179, 38, 30, 0.35);
+}
+.estado-recuperacion .boton-resolver-inconsistencia {
+  justify-self: start;
+  border: 1px solid #b3261e;
+  background: #fff;
+  color: #b3261e;
+  border-radius: 6px;
+  padding: 4px 10px;
+  cursor: pointer;
+  font-weight: 600;
+}
+.estado-recuperacion .boton-resolver-inconsistencia[disabled] {
+  opacity: 0.55;
+  cursor: wait;
+}

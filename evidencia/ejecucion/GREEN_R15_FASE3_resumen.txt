@@ -1,0 +1,15 @@
+FASE 3 R15 — VERDE (ALTA-04; prueba obligatoria 9)
+Cambios:
+- video_airbag.py: ErrorPersistenciaRevisiones + _guardar_json_verificado()
+  (comprueba ResultadoPersistencia.guardado; lanza con el error real).
+  guardar_revision_video ahora usa la escritura verificada; los caches
+  (RUTA_CACHE) siguen con _guardar_json tolerante por diseño.
+- dashboard/backend/app.py revisar_video: captura ErrorPersistenciaRevisiones
+  ⇒ 503 "La revisión no se guardó: …"; la revisión NO se aplica al documento
+  si el almacén durable falló (nunca éxito sin persistencia).
+Tests nuevos: pruebas/test_v15_10_1_r15_persistencia.py (3). RED antes del fix:
+2 failed / 1 passed (unidad no lanzaba; endpoint devolvía guardado:true).
+Suite completa: 813 passed / 13 failed / 1 skipped (13 = obsoletos V15.9
+conocidos; cero regresiones).
+...                                                                      [100%]
+3 passed in 0.50s

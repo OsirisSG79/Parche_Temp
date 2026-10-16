@@ -1,0 +1,6 @@
+=== SUITE FINAL R15.5 — árbol dev exacto en HEAD 5555a59 ===
+Fecha: 2026-10-16 16:06 UTC
+
+1010 passed, 1 warning in 152.79s (0:02:32)
+node: 38/38
+sin contaminación de .cache_ocr

@@ -1,0 +1,8 @@
+=== SIM R15.4 B_instalacion_usada ===
+Fecha: 2026-10-16 03:33 UTC
+
+Base 69b1900 USADA (checkpoint completado + doc rev 7) + payload R15.4 (123) + Relocate (1)
+Datos del usuario intactos tras la instalación (checkpoint y documento byte a byte)
+Identidad OK: VERSION.txt/app.py/index.html = 15.10.1-r15.4
+pytest (151s): 974 passed, 16 skipped, 1 warning in 150.12s (0:02:30)
+node: 38/38

@@ -1,0 +1,23 @@
+=== GREEN R15.4 F1 — compensación multi-almacén (HIGH-01) ===
+Fecha: 2026-10-16 02:33 UTC
+
+--- Pruebas nuevas ---
+collecting ... collected 8 items
+
+pruebas/test_v15_10_1_r154_compensacion_multialmacen.py::test_sin_datos_fallo_commit_restaura_sqlite_y_503 PASSED [ 12%]
+pruebas/test_v15_10_1_r154_compensacion_multialmacen.py::test_sin_datos_fallo_commit_restaura_marca_previa PASSED [ 25%]
+pruebas/test_v15_10_1_r154_compensacion_multialmacen.py::test_ocr_fallo_commit_no_deja_correcciones_ni_muestras PASSED [ 37%]
+pruebas/test_v15_10_1_r154_compensacion_multialmacen.py::test_video_fallo_commit_restaura_revision_durable PASSED [ 50%]
+pruebas/test_v15_10_1_r154_compensacion_multialmacen.py::test_video_fallo_commit_restaura_revision_previa PASSED [ 62%]
+pruebas/test_v15_10_1_r154_compensacion_multialmacen.py::test_aprender_zona_fallo_commit_devuelve_503 PASSED [ 75%]
+pruebas/test_v15_10_1_r154_compensacion_multialmacen.py::test_campo_manual_fallo_commit_503 PASSED [ 87%]
+pruebas/test_v15_10_1_r154_compensacion_multialmacen.py::test_video_exito_conserva_revision_y_documento PASSED [100%]
+
+============================== 8 passed in 0.58s ===============================
+
+--- Regresión dirigida (contratos R15→R15.3 + unittests AST) ---
+97 passed in 12.81s
+
+--- Suite completa ---
+975 passed, 0 failed (135.32s) — corrida completa previa a este log
+node: 37/37

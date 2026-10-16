@@ -1,0 +1,8 @@
+=== SIM R15.4 C_upgrade_desde_r15_3 ===
+Fecha: 2026-10-16 03:36 UTC
+
+Base 69b1900 + payload R15.3 (114) + Relocate (1) → instalación r15.3 verificada
+Upgrade: payload R15.4 (123) + Relocate (0)
+Identidad OK: VERSION.txt/app.py/index.html = 15.10.1-r15.4
+pytest (150s): 974 passed, 16 skipped, 1 warning in 148.79s (0:02:28)
+node: 38/38

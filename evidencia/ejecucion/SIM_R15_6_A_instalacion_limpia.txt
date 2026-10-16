@@ -1,0 +1,11 @@
+=== SIM R15.6 A — instalación limpia ===
+Fecha: 2026-10-16 19:44 UTC
+Base: 69b1900 (V15.9.10 + overlay R14) + payload MANIFEST_SHA256_R15_6 (verificado SHA-256 archivo por archivo)
+
+payload copiado y verificado: 141 archivos
+Relocate-LegacyRootDocs: ['README_R14.md raíz retirado (idéntico a docs/informes)']
+VERSION.txt=15.10.1-r15.6
+PATCH_BUILD en app.py: True
+cache-busting index (v=15.10.1-r15.6): 5
+pytest: 1034 passed, 16 skipped, 1 warning in 160.90s (0:02:40)
+node: 39/39

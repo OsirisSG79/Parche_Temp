@@ -1,0 +1,40 @@
+=== R15.3 F2 — EVIDENCIA RED (ALTO-02 + ALTO-03) ===
+Fecha: 2026-10-15T22:04:33+00:00 · Base: 005beb6 (R15.3 F1)
+
+$ PYTHONPATH=pruebas:. python -m pytest pruebas/test_v15_10_1_r153_cas_efectos.py -q
+    ])
+    def test_reserva_pipeline_bloquea_todas_las_mutaciones(env, monkeypatch,
+                                                           nombre, invocar):
+        """Con la reserva tomada y SIN hilo vivo (ventana entre admisión y
+        arranque), ninguna mutación incompatible puede pasar (ALTO-03:
+        restaurar_imagen_con_texto era la excepción en R15.2)."""
+        monkeypatch.setattr(backend, "_pipeline_hilo", None)
+        monkeypatch.setattr(backend, "_pipeline_reserva",
+                            {"ejecucion_id": "reservado", "origen": "pipeline",
+                             "reservado_en": "2026-10-15T00:00:00.000"},
+                            raising=False)
+        with pytest.raises(HTTPException) as rechazo:
+            invocar()
+>       assert rechazo.value.status_code == 409, (
+            f"{nombre}: se esperaba 409 por reserva de pipeline, llegó "
+            f"{rechazo.value.status_code} — {rechazo.value.detail}")
+E       AssertionError: con_texto: se esperaba 409 por reserva de pipeline, llegó 404 — Carpeta no encontrada.
+E       assert 404 == 409
+E        +  where 404 = HTTPException(status_code=404, detail='Carpeta no encontrada.').status_code
+E        +    where HTTPException(status_code=404, detail='Carpeta no encontrada.') = <ExceptionInfo HTTPException(status_code=404, detail='Carpeta no encontrada.') tblen=3>.value
+
+pruebas/test_v15_10_1_r153_cas_efectos.py:393: AssertionError
+=========================== short test summary info ============================
+FAILED pruebas/test_v15_10_1_r153_cas_efectos.py::test_sin_datos_rechazado_no_deja_fila_sqlite
+FAILED pruebas/test_v15_10_1_r153_cas_efectos.py::test_ocr_rechazado_no_deja_correcciones
+FAILED pruebas/test_v15_10_1_r153_cas_efectos.py::test_revisar_video_rechazado_no_deja_revision_durable
+FAILED pruebas/test_v15_10_1_r153_cas_efectos.py::test_aprender_zona_rechazado_no_deja_roi
+FAILED pruebas/test_v15_10_1_r153_cas_efectos.py::test_aprender_zona_fallo_commit_compensa_roi
+FAILED pruebas/test_v15_10_1_r153_cas_efectos.py::test_reserva_pipeline_bloquea_todas_las_mutaciones[con_texto-<lambda>]
+6 failed, 11 passed in 0.78s
+
+Lectura: las 4 rutas TOCTOU responden 409 CON el efecto durable persistido
+(marca SQLite / corrección SQLite / revisión durable / ROI aprendida);
+el fallo de commit deja la ROI sin compensar; restaurar_imagen_con_texto
+ignora la reserva (404 en vez de 409). Los otros 11 endpoints ya bloquean
+con reserva (regresión verde desde R15.2).

@@ -1,0 +1,14 @@
+FASE 5 R15 — VERDE (ALTA-06; prueba obligatoria 10)
+Cambios en dashboard/backend/app.py:
+- zona-aprendizaje y zona-revertir aplican el patrón del reanálisis global:
+  conservar metadatos de inventario (id, ruta_relativa, carpeta_video) Y
+  datos humanos (revision_manual, ultima_zona_nacimiento) → clear() →
+  update(nuevo) → reponer. Los campos obsoletos de la detección anterior
+  (frame_evento, tiempo_ms, tiempo_overlay_ms, fuente_tiempo, desde_cache,
+  algoritmo_video viejo) NO sobreviven a un cambio/reversión de ROI.
+Tests nuevos: pruebas/test_v15_10_1_r15_estados_obsoletos.py (2).
+RED antes del fix: 2 failed ("campo obsoleto sobrevivió: frame_evento=30").
+Suite completa: 822 passed / 13 failed / 1 skipped (13 = obsoletos V15.9
+conocidos; cero regresiones).
+..                                                                       [100%]
+2 passed in 0.51s

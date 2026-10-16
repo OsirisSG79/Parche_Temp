@@ -1,0 +1,21 @@
+=== R15.2 F4 — EVIDENCIA RED (ALTO-04 CAS estricto UI + efectos laterales) ===
+Fecha: 2026-10-15 · Commit base: 7211c0c (antes de la corrección)
+Archivo nuevo: pruebas/test_v15_10_1_r152_cas_ui.py
+
+$ PYTHONPATH=pruebas:. python -m pytest pruebas/test_v15_10_1_r152_cas_ui.py -q
+FAILED test_documento_versionado_exige_expected_revision[ocr]
+FAILED test_documento_versionado_exige_expected_revision[rotacion]
+FAILED test_documento_versionado_exige_expected_revision[sin_datos]
+FAILED test_documento_versionado_exige_expected_revision[verificar]
+FAILED test_documento_versionado_exige_expected_revision[consolidar]
+FAILED test_documento_versionado_exige_expected_revision[campo]
+FAILED test_sin_datos_rechazado_no_registra_evidencia
+FAILED test_ocr_rechazado_no_registra_correccion
+FAILED test_con_texto_rechazado_conserva_la_marca
+FAILED test_api_pruebas_expone_revision_documento
+10 failed, 11 passed in 0.73s
+
+Confirmación del efecto lateral antes de CAS (sin-datos): con documento
+versionado y expected_revision ausente, el endpoint registraba la marca en
+sqlite y luego mutaba sin CAS estricto (200 OK) — la auditoría lo reproduce
+igual. corregir_lectura registraba la corrección antes de mutar.

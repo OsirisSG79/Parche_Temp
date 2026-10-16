@@ -384,7 +384,10 @@ def test_n5_migracion_fallida_invalida_cache_y_reintenta(tmp_path, monkeypatch):
     monkeypatch.setattr(backend, "RUTA_VALIDACION", validacion)
     backend._cache.update({"mtime": None, "datos": None})
     monkeypatch.setattr(backend, "_advertencia_migracion_consensos", None)
-    real = backend.escribir_json_seguro
+    # R15.2 (CRÍTICO-02): la escritura del documento vive en la autoridad
+    # compartida; el fallo intermitente se inyecta allí.
+    from utilidades import persistencia_documento
+    real = persistencia_documento.escribir_json_seguro
     llamadas = {"n": 0}
 
     def intermitente(*args, **kwargs):
@@ -393,7 +396,7 @@ def test_n5_migracion_fallida_invalida_cache_y_reintenta(tmp_path, monkeypatch):
             return ResultadoPersistencia(False, validacion, 1, "ERROR INYECTADO")
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(backend, "escribir_json_seguro", intermitente)
+    monkeypatch.setattr(persistencia_documento, "escribir_json_seguro", intermitente)
     try:
         datos = backend._cargar_datos()
         # Fallo visible + caché invalidada para reintento.

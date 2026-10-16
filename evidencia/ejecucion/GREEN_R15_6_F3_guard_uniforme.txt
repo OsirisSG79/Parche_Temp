@@ -1,0 +1,11 @@
+=== GREEN R15.6 F3 — guard uniforme de pipeline ===
+Fecha: 2026-10-16 18:30 UTC · HEAD: 51a2e58
+
+--- Batería F3 (9) + arnés zonas (4) ---
+13 passed in 1.12s
+
+--- Suite completa en HEAD exacto ---
+1033 passed, 1 warning in 156.34s (0:02:36)
+
+--- Frontend node (cwd=raíz) ---
+node: 38/38 passed

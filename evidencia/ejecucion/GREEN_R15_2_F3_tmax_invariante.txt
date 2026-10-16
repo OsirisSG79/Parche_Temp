@@ -1,0 +1,13 @@
+=== R15.2 F3 — EVIDENCIA GREEN (ALTO-03) ===
+Fecha: 2026-10-15T20:50:38+00:00 · Commit: 7211c0c
+
+$ PYTHONPATH=. python -m pytest pruebas/test_v15_10_1_r152_tmax_invariante.py pruebas/test_v15_10_1_r13_breakout_maximo.py pruebas/test_v15_10_1_r15_tmax_causal.py pruebas/test_v15_10_1_r15_2_maximo_censurado.py -q
+..................................                                       [100%]
+34 passed in 1.45s
+
+Batería amplia video/apertura/reportes:
+$ pytest pruebas/ -q -k "resultado_caso or reporte or bmg or apertura or video or tmax or maximo or censura or breakout"
+211 passed, 700 deselected (ejecutado tras el fix)
+
+Post-fix, repro del auditor (señal plana 100 frames, breakout 5, fps 1000):
+ estado= sin_maximo_defendible  frame_max= 5  dur= 0.0  anomalias= ['maximo_coincide_con_breakout', 'sin_evidencia_de_expansion']

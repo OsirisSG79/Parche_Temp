@@ -1,0 +1,20 @@
+=== SUITE FINAL R15.6 — 3 pasadas consecutivas en HEAD exacto ===
+HEAD: e71080a (R15.6-F7c: cifras reales en CHANGELOG §3 y MATRIZ §3/§5 —)
+Árbol: 0 cambios sin commitear
+Fecha inicio: 2026-10-16 19:54 UTC
+
+--- Pasada 1 ---
+1045 passed, 5 skipped, 1 warning in 158.63s (0:02:38)
+sin contaminación (estado_inconsistente/recuperacion_requerida ausentes)
+
+--- Pasada 2 ---
+1045 passed, 5 skipped, 1 warning in 157.54s (0:02:37)
+sin contaminación (estado_inconsistente/recuperacion_requerida ausentes)
+
+--- Pasada 3 ---
+1045 passed, 5 skipped, 1 warning in 157.54s (0:02:37)
+sin contaminación (estado_inconsistente/recuperacion_requerida ausentes)
+
+--- Frontend node (cwd=raíz) ---
+node: 39/39 passed
+Fecha fin: 2026-10-16 20:02 UTC

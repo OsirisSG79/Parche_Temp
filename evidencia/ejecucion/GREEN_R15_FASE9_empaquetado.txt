@@ -1,0 +1,32 @@
+== EVIDENCIA — R15 Fase 9 (empaquetado y verificación del paquete) ==
+Fecha: 2026-10-15T16:08:15+00:00
+
+Paquete: V-Matrix-V15.10.1-R15_20261015.zip
+SHA-256: fc47a02c0bce587fd4c0fb0002ac214e1280b1ffaa54baa5c4fd65e703bb239a
+Tamaño: 644184 bytes · 132 entradas
+HEAD del árbol: 4fdeb4e R15 Fase 9c: matriz de evidencia con empaquetado y simulación de instalación (854/0/6)
+
+Contenido raíz del ZIP:
+  INSTALAR_R15.bat / INSTALAR_R15.ps1 (instalador transaccional, preflight fail-closed)
+  MANIFEST_SHA256_R15.txt (83 archivos instalables)
+  CHANGELOG_R15.md · V-MATRIX_R15.patch · SHA256SUMS.txt
+  verificar_sha256.sh · VERIFICAR_SHA256.ps1
+  evidencia/ (matriz + informe por hallazgo + ejecucion/ 17 archivos RED-GREEN)
+  skills/ (6)
+  payload en rutas relativas (dashboard/, utilidades/, pruebas/, docs/, *.py)
+
+Verificaciones ejecutadas:
+  1. SHA256SUMS desde dentro del ZIP extraido: 113 OK, 0 fallos
+  2. MANIFEST_SHA256_R15: 83 entradas, 0 hash incorrectos
+  3. V-MATRIX_R15.patch: git apply --check sobre 6f72828 (base R14) => limpio
+  4. Simulación de instalación (base R14 + 83 archivos del manifiesto +
+     dedup README_R14.md raíz): suite 854 passed / 0 failed / 6 skipped
+     (los 6 skips = pruebas de instalador, sólo aplican en paquete distribuible)
+     y Node 34/34 .cjs verdes.
+  5. Árbol de desarrollo: suite 860 passed / 0 failed / 0 skipped · Node 34/34
+
+Payload = 64 archivos del payload R14 (contenido R15) + 19 nuevos/cambiados:
+  nuevas pruebas R15 (concurrencia, revisiones, persistencia, tmax_causal,
+  estados_obsoletos, entradas, instalador, red_segura.cjs), red_segura.js,
+  docs/informes/README_R14.md (reubicado desde raíz), CHANGELOG/INFORME/MATRIZ
+  R15, y las 6 pruebas alineadas en Fase 8a + test_editor_zonas.cjs.

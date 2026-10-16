@@ -1,0 +1,6 @@
+=== GREEN R15.6 F6 — UI de recuperación (MEDIO-05) ===
+Fecha: 2026-10-16 19:02 UTC · HEAD: 40eb226
+
+OK: R15.6 UI de recuperación — lista bloqueos durables, anuncia el modo recuperación y los resuelve con confirmación explícita (MEDIO-05).
+Inventario node del árbol: 39 archivos .cjs
+node: 39/39 passed (cwd=raíz del árbol)

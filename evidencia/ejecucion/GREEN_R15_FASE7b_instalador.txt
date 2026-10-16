@@ -1,0 +1,25 @@
+== EVIDENCIA GREEN — R15 Fase 7b (MEDIA-12 + prueba obligatoria 17) ==
+Fecha: 2026-10-15T15:41:22+00:00
+
+RED (instalador R15 copiado de R14 con defecto intacto):
+  FAILED test_preflight_procesos_falla_cerrado_si_cim_falla (catch { return } presente)
+  FAILED test_param_force_existe_y_no_es_predeterminado
+  3 passed (patrones transaccionales heredados OK)
+
+GREEN (fix aplicado): pruebas/test_v15_10_1_r15_instalador.py -> 5 passed
+Suite completa: 847 passed / 13 failed (sólo obsoletos V15.9) / 0 skipped
+Node: 34/34 .cjs (sin cambios de frontend en esta fase)
+
+Corrección MEDIA-12 en INSTALAR_R15.ps1::Assert-VMatrixStopped:
+  - fallo CIM => Write-Warning visible + fallback Get-Process (rutas por proceso, permisos tolerados)
+  - procesos python/node con rutas no inspeccionables => NO verificado
+  - no verificado => throw (fail-closed) salvo -Force explícito (warning visible)
+  - param() añade [switch]$Force; R14 conservado sin modificar (referencia histórica)
+
+Incidente de entorno documentado: el sandbox eliminó .git entre turnos
+(historia 3d82a75..9d08baf perdida). Reconstruida vía base-repo(1222be6)+overlay
+parche-repo(8a1608e)+árbol de trabajo verificado íntegro por marcadores de fase.
+Commits reconstruidos: 6f72828 (base R14) -> 5d25e67 (R15 Fases 1-7b).
+También restaurados: chmod 755 *.command (C5) y 4 dirs baseline perdidos en
+la restauración del snapshot (DOCUMENTACION_ORIGINAL, codigo_final_referencia,
+V15_9_APERTURA_ROI_ZOOM_MATRIZ, V-Matrix-...R8_20261014).

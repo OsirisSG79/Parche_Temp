@@ -18,6 +18,20 @@ from typing import Any
 
 VERSION_ESTANDAR = "apertura-estandar-r13-v5"
 
+# R15.3 (ALTO-04): evidencia mínima de expansión post-breakout para poder
+# CONFIRMAR un máximo inflado. La invariante temporal de R15.2 (frame_max >
+# frame_breakout ∧ duración > 0) es necesaria pero no suficiente: una
+# variación de 1 px (0.01 %) por ruido de segmentación confirmaba un Tmax con
+# confianza 1.0. No se fija un porcentaje arbitrario único (recomendación del
+# auditor): se combinan piso RELATIVO (escala con resolución/ROI), piso
+# ABSOLUTO (ruido de sensor en áreas pequeñas) y PERSISTENCIA temporal.
+# Puertas conservadoras documentadas; la calibración fina con videos reales
+# es trabajo de campo (R16: trigger eléctrico fuera de alcance).
+EXPANSION_MINIMA_RELATIVA = 0.02       # ≥ 2 % del área visible en breakout
+EXPANSION_MINIMA_ABSOLUTA_PX = 25.0    # ≥ 25 px de crecimiento (piso de ruido)
+PERSISTENCIA_EXPANSION_FRAMES = 3      # frames sostenidos por encima del umbral
+CONFIANZA_MAX_NO_CONFIRMADO = 0.35     # P2: confianza coherente con el estado
+
 
 def _finito(valor: Any, defecto: float = 0.0) -> float:
     try:
@@ -411,7 +425,10 @@ def analizar_secuencia_despliegue(metricas: list[dict] | None,
                                    max_frames: int = 240,
                                    fraccion_maximo: float = 0.97,
                                    estabilidad_frames: int = 3,
-                                   caida_confirmacion: float = 0.04) -> dict:
+                                   caida_confirmacion: float = 0.04,
+                                   expansion_minima_relativa: float = EXPANSION_MINIMA_RELATIVA,
+                                   expansion_minima_absoluta_px: float = EXPANSION_MINIMA_ABSOLUTA_PX,
+                                   persistencia_expansion_frames: int = PERSISTENCIA_EXPANSION_FRAMES) -> dict:
     """R13: máquina de estados ligera para breakout -> expansión -> máximo.
 
     * ``breakout``: primer frame ya defendido por el detector de onset.
@@ -466,12 +483,15 @@ def analizar_secuencia_despliegue(metricas: list[dict] | None,
             "version": VERSION_ESTANDAR,
         }
 
-    # Mediana móvil corta: elimina un frame espurio sin desplazar mucho el pico.
+    # R15 (ALTA-05): mediana móvil CAUSAL — frame actual y dos anteriores,
+    # nunca anticipa el futuro. R14 recortaba bruto[i-1:i+2] y con sólo dos
+    # muestras elegía el MAYOR (len//2==1): el frame 0 heredaba el área del
+    # frame siguiente y el «máximo» podía caer en el propio breakout (0 ms,
+    # fases fuera de orden).
     suav = []
     for i in range(len(bruto)):
-        a = max(0, i - 1); b = min(len(bruto), i + 2)
-        vals = sorted(bruto[a:b])
-        suav.append(vals[len(vals)//2])
+        vals = sorted(bruto[max(0, i - 2): i + 1])
+        suav.append(vals[len(vals) // 2])
     pico = max(suav)
     idx_pico = suav.index(pico)
     frame_pico = inicio + idx_pico
@@ -490,40 +510,133 @@ def analizar_secuencia_despliegue(metricas: list[dict] | None,
             candidato_meseta = i
             break
     idx_max = candidato_meseta if candidato_meseta is not None else idx_pico
+    # R15 (ALTA-05) invariante: si el pico está después del breakout, el
+    # máximo no puede quedarse en el frame de breakout; se avanza al primer
+    # frame que alcanza el área objetivo (siempre existe: el propio pico).
+    if idx_max == 0 and idx_pico > 0:
+        idx_max = next((i for i in range(1, len(suav)) if suav[i] >= objetivo), idx_pico)
     frame_max = inicio + idx_max
 
     anomalias: list[str] = []
     if idx_pico >= len(suav) - 1:
         anomalias.append("maximo_en_borde_final_del_clip")
     posterior = suav[idx_pico + 1: idx_pico + 1 + max(2, estables)]
+    caida_confirmada = False
     if posterior:
         caida = (pico - min(posterior)) / max(pico, 1.0)
-        if caida < max(0.0, float(caida_confirmacion)) and candidato_meseta is None:
+        caida_confirmada = caida >= max(0.0, float(caida_confirmacion))
+        if not caida_confirmada and candidato_meseta is None:
             anomalias.append("maximo_sin_caida_o_meseta_clara")
     if len(suav) < estables + 2:
         anomalias.append("ventana_post_breakout_corta")
     if fps is None:
         anomalias.append("fps_captura_no_disponible")
 
+    # R15.1 (ALTO-06): breakout en el frame 0 del clip = evento censurado por
+    # derecha: no existe ningún frame previo limpio que demuestre que la bolsa
+    # estaba plegada antes de empezar a crecer.
+    censurado_al_inicio = (inicio == 0)
+    if censurado_al_inicio:
+        anomalias.append("evento_censurado_al_inicio")
+
+    # R15 (MEDIA-16): no inventar certeza. Máximo confirmado sólo con meseta
+    # o caída clara tras el pico; si el clip termina creciendo o no se
+    # confirma estabilidad, se publica como máximo visible observado NO
+    # confirmado; con señal insuficiente, sin máximo defendible.
+    if candidato_meseta is not None or caida_confirmada:
+        estado_secuencia = "maximo_inflado_estimado"
+    elif "ventana_post_breakout_corta" in anomalias:
+        estado_secuencia = "sin_maximo_defendible"
+    else:
+        estado_secuencia = "maximo_visible_observado_no_confirmado"
+
+    # R15.1 (ALTO-06): anulaciones por censura en frame 0.
+    # a) El máximo cae en el propio frame censurado (duración 0 ms): no hay
+    #    NINGUNA evidencia de crecimiento observada ⇒ sin máximo defendible;
+    #    nunca «máximo inflado estimado 0.000 ms».
+    # b) Hay crecimiento observado, pero el primer frame ya ocupa una fracción
+    #    relevante del pico (>50%): el despliegue pudo empezar antes de la
+    #    grabación y la duración es sólo una cota inferior ⇒ el estimado
+    #    confirmado se degrada a máximo visible observado NO confirmado.
+    if censurado_al_inicio and frame_max == inicio:
+        estado_secuencia = "sin_maximo_defendible"
+        anomalias.append("sin_evidencia_previa_del_crecimiento")
+    elif (censurado_al_inicio and estado_secuencia == "maximo_inflado_estimado"
+            and suav[0] > pico * 0.5):
+        estado_secuencia = "maximo_visible_observado_no_confirmado"
+
     t_break = (inicio * 1000.0 / fps) if fps else None
     t_max = (frame_max * 1000.0 / fps) if fps else None
     dur = ((frame_max - inicio) * 1000.0 / fps) if fps else None
+
+    # R15.2 (ALTO-03): invariante física GLOBAL de Tmax, independiente de la
+    # posición del breakout (las reglas R15.1 sólo cubrían el frame 0):
+    #
+    #     maximo_inflado_estimado ⇒ frame_max > frame_breakout ∧ dur > 0 ms
+    #
+    # Señal plana (o ya máxima) en el breakout ⇒ la «meseta» cae en el índice
+    # 0 del tramo y no existe NINGUNA evidencia de expansión posterior ⇒ no
+    # se confirma ningún máximo. Con expansión en frames pero sin fps, la
+    # duración no es cuantificable ⇒ se degrada a observado NO confirmado.
+    if estado_secuencia == "maximo_inflado_estimado" and (
+            frame_max <= inicio or dur is None or dur <= 0.0):
+        if frame_max <= inicio:
+            estado_secuencia = "sin_maximo_defendible"
+            anomalias.append("maximo_coincide_con_breakout")
+        else:
+            estado_secuencia = "maximo_visible_observado_no_confirmado"
+        anomalias.append("sin_evidencia_de_expansion")
+
+    # R15.3 (ALTO-04): invariante física de MAGNITUD/PERSISTENCIA de la
+    # expansión. Confirmar exige crecimiento relevante respecto al área en el
+    # breakout (piso relativo escalable + piso absoluto de ruido) sostenido
+    # varios frames. Sin magnitud no hay nada defendible (el «pico» es ruido);
+    # con magnitud pero sin persistencia queda como observado NO confirmado
+    # (glitch transitorio: algo visible, no defendible como máximo inflado).
+    # El auditor sugiere EXPANSION_POST_BREAKOUT_INSUFICIENTE; se usa
+    # snake_case como el resto de anomalías del estándar.
+    base_expansion = suav[0]
+    crecimiento_expansion = pico - base_expansion
+    umbral_magnitud = max(float(expansion_minima_absoluta_px),
+                          float(expansion_minima_relativa) * max(base_expansion, 1.0))
+    frames_expandidos = sum(1 for v in suav
+                            if v >= base_expansion + umbral_magnitud)
+    if estado_secuencia == "maximo_inflado_estimado" and (
+            crecimiento_expansion < umbral_magnitud
+            or frames_expandidos < int(persistencia_expansion_frames)):
+        anomalias.append("expansion_post_breakout_insuficiente")
+        if crecimiento_expansion < umbral_magnitud:
+            estado_secuencia = "sin_maximo_defendible"
+        else:
+            estado_secuencia = "maximo_visible_observado_no_confirmado"
+
     confianza_max = 1.0
+    if "evento_censurado_al_inicio" in anomalias:
+        confianza_max -= 0.20
     if "maximo_en_borde_final_del_clip" in anomalias:
         confianza_max -= 0.35
     if "maximo_sin_caida_o_meseta_clara" in anomalias:
         confianza_max -= 0.20
     if "ventana_post_breakout_corta" in anomalias:
         confianza_max -= 0.20
+    # R15.3 (ALTO-04, P2): penalización por expansión insuficiente y tope de
+    # coherencia: ningún estado NO confirmado puede viajar con confianza alta
+    # (en R15.2 una señal plana devolvía sin_maximo_defendible con 1.0).
+    if "expansion_post_breakout_insuficiente" in anomalias:
+        confianza_max -= 0.40
     confianza_max = max(0.0, min(1.0, confianza_max))
+    if estado_secuencia != "maximo_inflado_estimado":
+        confianza_max = min(confianza_max, CONFIANZA_MAX_NO_CONFIRMADO)
 
     fases = [
         {"estado": "breakout", "frame": inicio},
-        {"estado": "expansion", "frame": min(inicio + 1, len(metricas)-1)},
+        # R15 (ALTA-05): orden no decreciente; la expansión nunca queda
+        # después del máximo.
+        {"estado": "expansion", "frame": min(inicio + 1, frame_max, len(metricas) - 1)},
         {"estado": "maximo_inflado", "frame": frame_max},
     ]
     return {
-        "estado": "maximo_inflado_estimado" if frame_max is not None else "breakout_sin_maximo",
+        "estado": estado_secuencia if frame_max is not None else "breakout_sin_maximo",
         "frame_breakout": inicio,
         "frame_pico_area": frame_pico,
         "frame_max_inflado": int(frame_max),

@@ -1,0 +1,14 @@
+=== R15.2 F6 — EVIDENCIA GREEN (MEDIO/BAJO-06 instalador + identidad) ===
+Fecha: 2026-10-15T20:54:22+00:00 · Commit: fc62307
+
+$ PYTHONPATH=pruebas:. python -m pytest pruebas/test_v15_10_1_r15_4_instalador_base.py pruebas/test_v15_10_1_r15_instalador.py pruebas/test_v15_10_1_r14_auditoria_preventiva.py -q
+......................                                                   [100%]
+22 passed in 0.21s
+
+Identidad:
+  VERSION.txt = 15.10.1-r15.2
+92:PATCH_BUILD = "15.10.1-r15.2"
+  index.html r15.2 x5
+  INSTALAR_R15_2.ps1: 15 refs r15.2 · bases: basesVersion = @('15.10.1-r14','15.10.1-r15','15.10.1-r15.1','15.10.1-r15.2')
+
+PENDIENTE DE CAMPO (criterio 11): ejecución real en Windows (fallo CIM inducido, -Force, rollback) — sin pwsh en sandbox.

@@ -255,11 +255,47 @@ def _guardar_json(ruta: Path, data) -> None:
     escribir_json_seguro(ruta, data, lanzar=False, compacto=True)
 
 
+class ErrorPersistenciaRevisiones(RuntimeError):
+    """R15 (ALTA-04): el registro durable de revisiones no se guardó.
+
+    La revisión manual de video NUNCA debe reportarse como guardada si su
+    archivo durable no quedó escrito y verificado: un procesamiento futuro
+    reconstruye el video desde ese registro y la confirmación humana
+    desaparecería. Misma política que ErrorPersistenciaAprendizaje.
+    """
+
+
+def _guardar_json_verificado(ruta: Path, data) -> None:
+    """Escribe y VERIFICA el resultado; lanza si no se persistió.
+
+    Para almacenes durables (registro de revisiones). Los caches siguen
+    usando ``_guardar_json`` tolerante: perder un cache no pierde datos
+    humanos ni debe romper una operación válida.
+    """
+    resultado = escribir_json_seguro(ruta, data, lanzar=False, compacto=True)
+    if not getattr(resultado, "guardado", False):
+        error = getattr(resultado, "error", None) or "escritura no verificada"
+        raise ErrorPersistenciaRevisiones(
+            f"No se pudo guardar {ruta.name}: {error}")
+
+
 def cargar_revisiones() -> dict:
     data = _leer_json(RUTA_REVISIONES, {"version": 1, "revisiones": {}})
     if not isinstance(data, dict) or not isinstance(data.get("revisiones"), dict):
         return {"version": 1, "revisiones": {}}
     return data
+
+
+def restaurar_revisiones(snapshot: dict) -> None:
+    """R15.4 (HIGH-01): restaura fielmente el registro durable de revisiones.
+
+    Compensación cuando el commit del documento de resultados falla después
+    de ``guardar_revision_video``: la revisión durable no puede sobrevivir a
+    una petición que no llegó al documento. ``snapshot`` es el valor devuelto
+    por ``cargar_revisiones()`` ANTES del efecto. Escritura verificada: si la
+    restauración no se persiste, lanza ``ErrorPersistenciaRevisiones``.
+    """
+    _guardar_json_verificado(RUTA_REVISIONES, snapshot)
 
 
 def guardar_revision_video(ruta_video: str | Path, *, case_key: str | None,
@@ -319,7 +355,9 @@ def guardar_revision_video(ruta_video: str | Path, *, case_key: str | None,
     from datetime import datetime
     revision["confirmado_en"] = datetime.now().isoformat(timespec="seconds")
     data["revisiones"][firma] = revision
-    _guardar_json(RUTA_REVISIONES, data)
+    # R15 (ALTA-04): escritura VERIFICADA del almacén durable. Si falla, se
+    # lanza ErrorPersistenciaRevisiones y el endpoint no puede declarar éxito.
+    _guardar_json_verificado(RUTA_REVISIONES, data)
     return revision
 
 
@@ -2511,6 +2549,9 @@ def analizar_video(ruta_video: str | Path, config: dict | None = None, *, usar_c
     resultado["tiempo_max_inflado_estimado_ms"] = secuencia_r13.get("tiempo_max_inflado_ms")
     resultado["duracion_hasta_max_inflado_ms"] = secuencia_r13.get("duracion_expansion_ms")
     resultado["anomalías_despliegue"] = list(secuencia_r13.get("anomalías") or [])
+    # R15.1 (ALTO-06/MEDIO-09): estado explícito del máximo por video; la UI
+    # debe poder mostrar «NO CONFIRMADO» sin re-derivar nada.
+    resultado["estado_max_inflado"] = secuencia_r13.get("estado")
     resultado["tiempos_relativos_inicio_video"] = True
     resultado["trigger_electrico_disponible"] = False
     decision_sombra = decidir_apertura(

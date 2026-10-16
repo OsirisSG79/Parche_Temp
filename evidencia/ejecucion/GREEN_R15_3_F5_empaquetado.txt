@@ -1,0 +1,62 @@
+=== R15.3 F5 — EVIDENCIA DE EMPAQUETADO Y SIMULACIONES DE INSTALACIÓN ===
+Fecha: 2026-10-15T23:00:47+00:00
+Árbol de desarrollo: r15-repo @ fcc5bfc (docs F5; identidad 15.10.1-r15.3)
+Nota: el SHA-256 del ZIP FINAL se reporta en el mensaje de entrega (este log
+viaja DENTRO del ZIP; precedente R15.1/R15.2 idéntico).
+
+--- Contenido del paquete ---
+payload (MANIFEST_SHA256_R15_3.txt): 114 archivos = manifiesto R15.2 (107)
+  + aprendizaje_video_airbag.py (helper transaccional de compensación, ALTO-02)
+  + 3 pruebas r153 nuevas (admision_atomica, cas_efectos, tmax_magnitud)
+  + docs/informes/{CHANGELOG,INFORME,MATRIZ}_R15_3.md
+raíz ZIP: CHANGELOG_R15_3.md, INSTALAR_R15_3.ps1/.bat, V-MATRIX_R15_3.patch
+  (git diff 69b1900..HEAD, 11284 líneas), MANIFEST_SHA256_R15_3.txt,
+  SHA256SUMS.txt, verificar_sha256.sh, VERIFICAR_SHA256.ps1
+evidencia/: INFORME+MATRIZ (copias) + ejecucion/ (logs RED/GREEN R15→R15.3)
+skills/: 6 SKILL.md (.agents/skills/v-matrix-*)
+
+--- Verificación interna del ZIP (extraído, antes de sims) ---
+$ bash verificar_sha256.sh   (desde dentro del ZIP extraído)
+0 FAILED (todas las entradas OK; último: video_airbag.py: OK)
+$ manifiesto: 114 entradas, 0 archivos faltantes, 0 desvíos de hash
+
+--- Simulación A: instalación LIMPIA (criterios 7) ---
+Base: git clone r15-repo @ 69b1900 (V15.9.10 + overlay R14) sin .git
++ verificación hash a hash del manifiesto contra el ZIP (0 desvíos)
++ copia del payload + réplica de Relocate-LegacyRootDocs + chmod 755 *.command
+pytest: 951 passed, 16 skipped, 0 failed
+  (16 skips = 15 pruebas de instalador sin INSTALAR_R15_3.ps1 en el árbol
+   payload — mismo criterio que R15.1/R15.2 — + 1 de plataforma)
+node: 37/37 .cjs OK
+
+--- Simulación B: instalación USADA ---
+Ídem A + sembrado de estado de uso real:
+  .cache_ocr/estado_pipeline.json = {"estado":"completado","ejecucion_id":"usada-20261014","progreso_pct":100.0,"reanudable":false}
+  validacion_resultados.json raíz = documento versionado revision_documento=7
+pytest: 951 passed, 16 skipped, 0 failed
+node: 37/37 .cjs OK
+
+--- Simulación C: UPGRADE desde R15.2 instalado (base acumulativa) ---
+Base 69b1900 + payload completo del ZIP R15.2 (107 archivos, 0 desvíos)
++ réplica de Relocate-LegacyRootDocs + payload R15.3 encima (0 desvíos)
+pytest: 951 passed, 16 skipped, 0 failed
+node: 37/37 .cjs OK
+→ el árbol R15.2 actualizado con R15.3 queda idéntico en comportamiento al
+  árbol limpio (las bases acumulativas r14→r15.3 del instalador se sostienen
+  también a nivel de contenido).
+
+--- Coherencia de cifras ---
+dev: 967 passed / 0 failed · sims A/B/C: 951 passed + 16 skipped = 967
+(sin pérdidas en las tres simulaciones)
+
+--- BAJO-06: conteos Node por ámbito (fix documental) ---
+pruebas/*.cjs activos (dev y sims): 37 · 37/37 verdes en las 4 corridas
+copias históricas fuera de pruebas/: 8 (codigo_final_referencia ×4,
+  V15_9_APERTURA_ROI_ZOOM_MATRIZ/archivos ×1, V-Matrix-…R8_20261014 ×3)
+total repo (find global): 45
+El "38" del auditor no es reproducible en dev ni sims; toda cifra declarada
+indica su ámbito (changelog, informe y matriz R15.3).
+
+PENDIENTE DE CAMPO (criterio 8 / CAMPO-07): INSTALAR_R15_3 en Windows real
+(proceso activo, CIM/WMI caído, fallback, -Force, archivo bloqueado, error a
+mitad, rollback, reinstalación). Sin pwsh en sandbox; pruebas estáticas 22/22.

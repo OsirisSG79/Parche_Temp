@@ -1,0 +1,17 @@
+=== RED R15.6 F3 — guard uniforme de pipeline (ALTO-08/09/10) ===
+Fecha: 2026-10-16 18:25 UTC · HEAD: 981453a
+
+        el pipeline puede estar modificando el caso (ALTO-10, reproceso)."""
+        monkeypatch.setattr(backend, "_video_reanalisis_hilo", _HiloVivo())
+>       with pytest.raises(HTTPException) as rechazo:
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE <class 'fastapi.exceptions.HTTPException'>
+
+pruebas/test_v15_10_1_r156_guard_uniforme.py:148: Failed
+=========================== short test summary info ============================
+FAILED pruebas/test_v15_10_1_r156_guard_uniforme.py::test_editar_zona_reserva_bloquea
+FAILED pruebas/test_v15_10_1_r156_guard_uniforme.py::test_orientacion_regional_reserva_bloquea
+FAILED pruebas/test_v15_10_1_r156_guard_uniforme.py::test_revision_completada_reserva_bloquea
+FAILED pruebas/test_v15_10_1_r156_guard_uniforme.py::test_revision_completada_procesando_bloquea
+FAILED pruebas/test_v15_10_1_r156_guard_uniforme.py::test_revision_completada_reanalisis_bloquea
+========================= 5 failed, 4 passed in 0.86s ==========================

@@ -1,0 +1,14 @@
+=== RED R15.4 F2 — lock corto + reserva de operación (MEDIUM-02) ===
+Árbol: 49d761b (F1) + test nuevo, SIN corrección
+Fecha: 2026-10-16 02:36 UTC
+
+E            +    where wait = <threading.Event at 0x7f98c9bdcf30: unset>.wait
+
+pruebas/test_v15_10_1_r154_lock_corto.py:176: AssertionError
+=========================== short test summary info ============================
+FAILED pruebas/test_v15_10_1_r154_lock_corto.py::test_analisis_pesado_no_bloquea_el_lock_documento
+FAILED pruebas/test_v15_10_1_r154_lock_corto.py::test_operacion_concurrente_mismo_video_423_inmediato
+FAILED pruebas/test_v15_10_1_r154_lock_corto.py::test_cas_durante_analisis_409_y_roi_compensada
+FAILED pruebas/test_v15_10_1_r154_lock_corto.py::test_analisis_422_conserva_roi_y_libera_reserva
+FAILED pruebas/test_v15_10_1_r154_lock_corto.py::test_revertir_tambien_reserva_el_recurso
+5 failed in 14.22s

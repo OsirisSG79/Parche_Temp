@@ -1,0 +1,17 @@
+=== GREEN R15.5 F3 — guardar_rotacion transaccional (HIGH-02) ===
+Fecha: 2026-10-16 15:09 UTC
+
+collecting ... collected 4 items
+
+pruebas/test_v15_10_1_r155_rotacion_transaccional.py::test_fallo_almacen_rotacion_no_toca_documento PASSED [ 25%]
+pruebas/test_v15_10_1_r155_rotacion_transaccional.py::test_fallo_commit_restaura_rotacion_y_evidencias PASSED [ 50%]
+pruebas/test_v15_10_1_r155_rotacion_transaccional.py::test_doble_fallo_declara_inconsistente_y_bloquea PASSED [ 75%]
+pruebas/test_v15_10_1_r155_rotacion_transaccional.py::test_exito_rota_documento_y_almacen_coherentes PASSED [100%]
+
+============================== 4 passed in 0.61s ===============================
+
+--- Regresión amplia (rotación/externas/editor + snapshot ampliado) ---
+16 passed, 988 deselected, 1 warning in 1.75s
+
+--- Suite completa ---
+1004 passed, 0 failed (152.32s) · node 38/38 · sin contaminación de .cache_ocr

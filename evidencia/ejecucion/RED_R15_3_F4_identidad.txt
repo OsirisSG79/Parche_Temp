@@ -1,0 +1,121 @@
+=== RED R15.3 F4 — identidad del paquete (pins r15.3 sobre contenido r15.2) ===
+Base: be93c68 + 3 archivos de prueba actualizados + git mv INSTALAR_R15_2.*→INSTALAR_R15_3.* (sin tocar contenido)
+Fecha: 2026-10-15 22:33 UTC
+
+..F.F.FFF...F.......FF                                                   [100%]
+=================================== FAILURES ===================================
+_________ test_instalador_r15_3_es_transaccional_con_backup_pre_r15_3 __________
+
+    def test_instalador_r15_3_es_transaccional_con_backup_pre_r15_3():
+        texto = _texto()
+        for patron in (
+            "Rollback-Transaction", "Assert-VMatrixStopped", "Assert-TargetWritable",
+            "Assert-FreeSpace", "Assert-SafeRelative", "Copy-Verified",
+            "PATCH_INSTALLED_V15_10_1_R15_3.json", "15.10.1-r15.3",
+            "MANIFEST_SHA256_R15_3.txt", "_BACKUP_PRE_R15_3_",
+            "PARCHE_R15_3_COPIADO_Y_VERIFICADO_OK",
+        ):
+>           assert patron in texto, f"falta {patron} en INSTALAR_R15_3.ps1"
+E           AssertionError: falta PATCH_INSTALLED_V15_10_1_R15_3.json en INSTALAR_R15_3.ps1
+E           assert 'PATCH_INSTALLED_V15_10_1_R15_3.json' in "param(\n  [string]$Target = 'C:\\Programas Base\\OCR-Validacion-Excel-ocr-gpu-produccion',\n  [switch]$VerifyOnly,\n ...('ERROR: '+$_.Exception.Message) -ForegroundColor Red\n  if (-not $VerifyOnly) { Rollback-Transaction }\n  exit 1\n}\n"
+
+pruebas/test_v15_10_1_r15_instalador.py:94: AssertionError
+____________________ test_bat_r15_3_invoca_al_ps1_y_reporta ____________________
+
+    def test_bat_r15_3_invoca_al_ps1_y_reporta():
+        assert BAT.is_file(), "Falta INSTALAR_R15_3.bat"
+        texto = BAT.read_text(encoding="utf-8", errors="replace")
+>       assert "INSTALAR_R15_3.ps1" in texto
+E       assert 'INSTALAR_R15_3.ps1' in '@echo off\nsetlocal\ncd /d "%~dp0"\necho.\necho === V-Matrix V15.10.1 R15.2 - instalador auditado y transaccional ===...15.2 instalado y verificado en disco.\necho Reinicia V-Matrix y confirma patch_build 15.10.1-r15.2.\npause\nendlocal\n'
+
+pruebas/test_v15_10_1_r15_instalador.py:114: AssertionError
+______________________ test_bat_reenvia_argumentos_al_ps1 ______________________
+
+    def test_bat_reenvia_argumentos_al_ps1():
+        assert BAT.is_file(), "Falta INSTALAR_R15_3.bat"
+        texto = BAT.read_text(encoding="utf-8", errors="replace")
+>       assert "INSTALAR_R15_3.ps1" in texto
+E       assert 'INSTALAR_R15_3.ps1' in '@echo off\nsetlocal\ncd /d "%~dp0"\necho.\necho === V-Matrix V15.10.1 R15.2 - instalador auditado y transaccional ===...15.2 instalado y verificado en disco.\necho Reinicia V-Matrix y confirma patch_build 15.10.1-r15.2.\npause\nendlocal\n'
+
+pruebas/test_v15_10_1_r15_4_instalador_base.py:87: AssertionError
+____________ test_preflight_exige_base_conocida_antes_de_modificar _____________
+
+    def test_preflight_exige_base_conocida_antes_de_modificar():
+        texto = _texto()
+        base = _funcion(texto, "Assert-BaseConocida")
+        assert "VERSION.txt" in base
+        for version in ("15.10.1-r14", "15.10.1-r15", "15.10.1-r15.1",
+                        "15.10.1-r15.2", "15.10.1-r15.3"):
+>           assert version in base, f"falta la base aceptada {version}"
+E           AssertionError: falta la base aceptada 15.10.1-r15.3
+E           assert '15.10.1-r15.3' in 'function Assert-BaseConocida {\n  # R15.1 (ALTO-04): este parche es ACUMULATIVO: solo se instala sobre una\n  # base ...ste parche es acumulativo y requiere V15.9.10 + R14 instalado (o R15/R15.1/R15.2). No se modifico ningun archivo.")\n}'
+
+pruebas/test_v15_10_1_r15_4_instalador_base.py:102: AssertionError
+______________ test_identidad_r15_3_coherente_en_todo_el_paquete _______________
+
+    def test_identidad_r15_3_coherente_en_todo_el_paquete():
+        texto = _texto()
+        for patron in ("MANIFEST_SHA256_R15_3.txt",
+                       "PATCH_INSTALLED_V15_10_1_R15_3.json",
+                       "'15.10.1-r15.3'", "_BACKUP_PRE_R15_3_",
+                       "PARCHE_R15_3_COPIADO_Y_VERIFICADO_OK"):
+>           assert patron in texto, f"falta {patron} en INSTALAR_R15_3.ps1"
+E           AssertionError: falta MANIFEST_SHA256_R15_3.txt en INSTALAR_R15_3.ps1
+E           assert 'MANIFEST_SHA256_R15_3.txt' in "param(\n  [string]$Target = 'C:\\Programas Base\\OCR-Validacion-Excel-ocr-gpu-produccion',\n  [switch]$VerifyOnly,\n ...('ERROR: '+$_.Exception.Message) -ForegroundColor Red\n  if (-not $VerifyOnly) { Rollback-Transaction }\n  exit 1\n}\n"
+
+pruebas/test_v15_10_1_r15_4_instalador_base.py:126: AssertionError
+_____________________ test_postflight_verifica_version_txt _____________________
+
+    def test_postflight_verifica_version_txt():
+        texto = _texto()
+        postflight = texto.split("Verificacion SHA-256 en destino", 1)[-1]
+        assert "VERSION.txt" in postflight, (
+            "el postflight no verifica VERSION.txt (ALTO-05)")
+>       assert re.search(r"15\\\.10\\\.1-r15\\\.3", postflight), (
+            "el postflight no exige el contenido 15.10.1-r15.3 en VERSION.txt")
+E       AssertionError: el postflight no exige el contenido 15.10.1-r15.3 en VERSION.txt
+E       assert None
+E        +  where None = <function search at 0x7ff975b7f7e0>('15\\\\\\.10\\\\\\.1-r15\\\\\\.3', "'\n  $errors=New-Object System.Collections.ArrayList\n  foreach ($item in $items) {\n    $dst=Join-Path $Target ($ite...('ERROR: '+$_.Exception.Message) -ForegroundColor Red\n  if (-not $VerifyOnly) { Rollback-Transaction }\n  exit 1\n}\n")
+E        +    where <function search at 0x7ff975b7f7e0> = re.search
+
+pruebas/test_v15_10_1_r15_4_instalador_base.py:170: AssertionError
+_______________ test_backend_publica_salud_y_persistencia_segura _______________
+
+    def test_backend_publica_salud_y_persistencia_segura():
+        # R15.3 (SUPERSEDE documentado): el pin de versión sigue el release. La
+        # auditoría preventiva R14 fijaba PATCH_BUILD = "15.10.1-r14"; R15 publicó
+        # "15.10.1-r15", R15.1 "15.10.1-r15.1", R15.2 "15.10.1-r15.2" y R15.3
+        # publica "15.10.1-r15.3". Todo lo demás del contrato R14 se conserva.
+        texto = (ROOT / "dashboard/backend/app.py").read_text(encoding="utf-8")
+        assert '@app.get("/api/salud")' in texto
+        assert '"persistencia_segura"' in texto
+        assert "validar_bbox_normalizado" in texto
+        assert "validar_nombre_excel" in texto
+        assert "es_raiz_codigo_seleccionada" in texto
+>       assert 'PATCH_BUILD = "15.10.1-r15.3"' in texto
+E       assert 'PATCH_BUILD = "15.10.1-r15.3"' in '"""\napp.py — Backend FastAPI del dashboard (Fase 4).\n\nPropósito\n---------\nExpone localmente los datos que ya pro...t(f"Dashboard: http://127.0.0.1:{puerto}")\n    uvicorn.run(app, host="127.0.0.1", port=puerto, log_level="warning")\n'
+
+pruebas/test_v15_10_1_r14_auditoria_preventiva.py:75: AssertionError
+___________________________ test_frontend_cache_r14 ____________________________
+
+    def test_frontend_cache_r14():
+        # R15.3 (SUPERSEDE documentado): el busteo de caché del frontend sigue el
+        # release (r14 -> r15 -> r15.1 -> r15.2 -> r15.3) y no debe quedar ningún
+        # asset con versión vieja.
+        index = (ROOT / "dashboard/frontend/index.html").read_text(encoding="utf-8")
+>       assert index.count("15.10.1-r15.3") >= 5
+E       assert 0 >= 5
+E        +  where 0 = <built-in method count of str object at 0x55a27af6d280>('15.10.1-r15.3')
+E        +    where <built-in method count of str object at 0x55a27af6d280> = '<!DOCTYPE html>\n<html lang="es">\n<head>\n  <!-- compat-estabilidad-v11: 20260921-v11-1 -->\n  <meta charset="UTF-8"...pt src="red_segura.js?v=15.10.1-r15.2"></script>\n  <script src="app.js?v=15.10.1-r15.2"></script>\n</body>\n</html>\n'.count
+
+pruebas/test_v15_10_1_r14_auditoria_preventiva.py:83: AssertionError
+=========================== short test summary info ============================
+FAILED pruebas/test_v15_10_1_r15_instalador.py::test_instalador_r15_3_es_transaccional_con_backup_pre_r15_3
+FAILED pruebas/test_v15_10_1_r15_instalador.py::test_bat_r15_3_invoca_al_ps1_y_reporta
+FAILED pruebas/test_v15_10_1_r15_4_instalador_base.py::test_bat_reenvia_argumentos_al_ps1
+FAILED pruebas/test_v15_10_1_r15_4_instalador_base.py::test_preflight_exige_base_conocida_antes_de_modificar
+FAILED pruebas/test_v15_10_1_r15_4_instalador_base.py::test_identidad_r15_3_coherente_en_todo_el_paquete
+FAILED pruebas/test_v15_10_1_r15_4_instalador_base.py::test_postflight_verifica_version_txt
+FAILED pruebas/test_v15_10_1_r14_auditoria_preventiva.py::test_backend_publica_salud_y_persistencia_segura
+FAILED pruebas/test_v15_10_1_r14_auditoria_preventiva.py::test_frontend_cache_r14
+8 failed, 14 passed in 0.37s

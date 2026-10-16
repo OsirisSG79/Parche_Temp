@@ -1,0 +1,14 @@
+=== RED R15.6 F5 — documento externo sin autoridad (ALTO-04) ===
+Fecha: 2026-10-16 18:49 UTC · HEAD: 1f582e9
+
+
+pruebas/test_v15_10_1_r156_documento_externo.py:182: AttributeError
+=========================== short test summary info ============================
+FAILED pruebas/test_v15_10_1_r156_documento_externo.py::test_dos_pestanas_preservan_ambos_cambios
+FAILED pruebas/test_v15_10_1_r156_documento_externo.py::test_commit_externo_versiona_revision
+FAILED pruebas/test_v15_10_1_r156_documento_externo.py::test_expected_revision_desfasada_409_sin_efectos
+FAILED pruebas/test_v15_10_1_r156_documento_externo.py::test_expected_revision_correcta_confirma
+FAILED pruebas/test_v15_10_1_r156_documento_externo.py::test_restaurar_con_texto_versiona_y_cas
+FAILED pruebas/test_v15_10_1_r156_documento_externo.py::test_commit_completo_monotonico
+FAILED pruebas/test_v15_10_1_r156_documento_externo.py::test_commit_completo_sin_documento_previo
+7 failed in 0.63s

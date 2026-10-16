@@ -62,15 +62,30 @@ def test_instalador_r14_es_transaccional_y_hace_preflight():
 
 
 def test_backend_publica_salud_y_persistencia_segura():
+    # R15.5 (SUPERSEDE documentado): el pin de versión sigue el release. La
+    # auditoría preventiva R14 fijaba PATCH_BUILD = "15.10.1-r14"; R15 publicó
+    # "15.10.1-r15", R15.1 "15.10.1-r15.1", R15.2 "15.10.1-r15.2", R15.3
+    # "15.10.1-r15.3", R15.4 "15.10.1-r15.4", R15.5 "15.10.1-r15.5" y R15.6
+    # publica "15.10.1-r15.6".
+    # Todo lo demás del contrato R14 se conserva.
     texto = (ROOT / "dashboard/backend/app.py").read_text(encoding="utf-8")
     assert '@app.get("/api/salud")' in texto
     assert '"persistencia_segura"' in texto
     assert "validar_bbox_normalizado" in texto
     assert "validar_nombre_excel" in texto
     assert "es_raiz_codigo_seleccionada" in texto
-    assert 'PATCH_BUILD = "15.10.1-r14"' in texto
+    assert 'PATCH_BUILD = "15.10.1-r15.6"' in texto
 
 
 def test_frontend_cache_r14():
+    # R15.5 (SUPERSEDE documentado): el busteo de caché del frontend sigue el
+    # release (r14 -> ... -> r15.5 -> r15.6) y no debe quedar ningún asset con
+    # versión vieja.
     index = (ROOT / "dashboard/frontend/index.html").read_text(encoding="utf-8")
-    assert index.count("15.10.1-r14") >= 4
+    assert index.count("15.10.1-r15.6") >= 5
+    assert 'v=15.10.1-r15"' not in index
+    assert "15.10.1-r14" not in index
+    assert "15.10.1-r15.1" not in index
+    assert "15.10.1-r15.2" not in index
+    assert "15.10.1-r15.3" not in index
+    assert "15.10.1-r15.4" not in index

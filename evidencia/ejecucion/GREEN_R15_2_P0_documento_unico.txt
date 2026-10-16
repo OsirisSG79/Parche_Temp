@@ -1,0 +1,10 @@
+=== R15.2 P0 — EVIDENCIA GREEN (CRÍTICO-01 + CRÍTICO-02) ===
+Fecha: 2026-10-15T20:14:50+00:00
+
+Suite dev completa:
+$ PYTHONPATH=. python -m pytest pruebas/ -q
+903 passed, 1 warning in 136.88s (0:02:16)
+
+Detalle RED->GREEN del archivo nuevo:
+$ PYTHONPATH=. python -m pytest pruebas/test_v15_10_1_r152_documento_unico.py pruebas/test_v15_10_1_r15_1_documento_global.py pruebas/test_v15_10_1_r15_revisiones.py -q
+32 passed

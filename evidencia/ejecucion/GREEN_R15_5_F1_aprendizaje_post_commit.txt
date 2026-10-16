@@ -1,0 +1,14 @@
+=== GREEN R15.5 F1 — aprendizaje post-commit (HIGH-01) ===
+Fecha: 2026-10-16 14:29 UTC
+
+collecting ... collected 4 items
+
+pruebas/test_v15_10_1_r155_aprendizaje_post_commit.py::test_confirmado_fallo_commit_no_entrena PASSED [ 25%]
+pruebas/test_v15_10_1_r155_aprendizaje_post_commit.py::test_fallo_aprendizaje_devuelve_exito_con_advertencia PASSED [ 50%]
+pruebas/test_v15_10_1_r155_aprendizaje_post_commit.py::test_exito_entrena_tras_commit PASSED [ 75%]
+pruebas/test_v15_10_1_r155_aprendizaje_post_commit.py::test_pendiente_no_entrena_nunca PASSED [100%]
+
+============================== 4 passed in 0.54s ===============================
+
+--- Regresión dirigida (rutas de video/compensación) ---
+45 passed (compensacion_multialmacen 8 + cas_efectos 17 + revisiones + lock_corto 5 + checkpoint_seguro 8)

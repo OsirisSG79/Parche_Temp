@@ -1,0 +1,14 @@
+=== R15.2 F5 — EVIDENCIA RED (MEDIO-05 badge <strong> literal) ===
+Fecha: 2026-10-15 · Commit base: 7211c0c (antes de la corrección)
+Archivo nuevo: pruebas/test_v15_10_1_r152_ui_cas_y_badges.cjs
+
+$ node pruebas/test_v15_10_1_r152_ui_cas_y_badges.cjs
+AssertionError [ERR_ASSERTION]: app.js no define maximoNoConfirmadoBadge()
+
+Defecto confirmado en el fuente R15.1 (líneas 4211 y 4256 de app.js):
+  ${... ? ` · <strong>${t("NO CONFIRMADO")}</strong> (${...})` : ""}
+La cadena con etiquetas se interpola en el template htm ⇒ React la renderiza
+como TEXTO literal (el usuario ve "<strong>NO CONFIRMADO</strong>").
+Corrección: helper maximoNoConfirmadoBadge con html`` anidado (elemento real),
+probado con RENDER del vendor (React+htm): textContent sin "<" ni ">" y nodo
+<strong> de verdad; ambos sitios usan el helper.

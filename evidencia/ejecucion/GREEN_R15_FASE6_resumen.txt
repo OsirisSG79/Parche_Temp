@@ -1,0 +1,42 @@
+FASE 6 R15 — VERDE (MEDIA-08 + MEDIA-09 + MEDIA-13 + BAJA-17 + MEDIA-14 cliente)
+Pruebas obligatorias 13 y 14 del auditor + mitigación lado cliente de MEDIA-14.
+
+Nuevos/modificados:
+- dashboard/frontend/red_segura.js (NUEVO, UMD como visor_precision.js):
+  crearSondeoSerial (polling que NUNCA solapa: la siguiente consulta se
+  programa al terminar la anterior; detener() corta el bucle),
+  crearGuardaSecuencia (contador de versión: una respuesta antigua jamás
+  sobrescribe una nueva) y lanzar404 (política explícita de 404).
+- app.js:
+  * MEDIA-08: polling de proceso (/api/pipeline/estado + /api/video/reanalisis/
+    estado) y del listado (/api/pruebas) con sondeo serial + guarda de
+    secuencia; eliminados los setInterval solapables de 1200 ms.
+  * MEDIA-09: frame principal con fetch + AbortController + Blob URL + debounce
+    60 ms: la descarga/decodificación anterior se CANCELA (máximo una petición
+    activa por tarjeta); doble búfer conservado; revoke de Blob URLs.
+  * MEDIA-13: pedirJSON(url, signal, opciones) con permitir404:false en
+    recursos concretos (12× /api/pruebas/{id} y /api/video/tiempo-frame);
+    el 404 ya no se convierte en null silencioso que deja información vieja.
+  * MEDIA-14 cliente: TarjetaVideoAirbag recibe revisionDocumento (desde
+    detalle.revision_documento) y envía expected_revision en /api/video/
+    revision, /maximo, /zona-aprendizaje, /zona-revertir; el flujo combinado
+    encadena la revisión devuelta por cada respuesta; un 409 «recarga antes
+    de guardar» muestra el mensaje Y recarga el detalle (falloMutacion).
+  * BAJA-17: eliminado el title duplicado del botón «Esta zona + este cuadro
+    = apertura»; el tooltip de evento censurado ya no se sobrescribe.
+- index.html: carga red_segura.js antes que app.js.
+- pruebas/test_editor_zonas.cjs: REPARACIÓN DE ARNÉS documentada (no cambia
+  contrato ni aserciones): el harness evaluaba app.js sin cargar
+  visor_precision.js y en un vm window≠globalThis ⇒ TypeError en estiloCaja.
+  Falla PREEXISTENTE desde V15.9.10, reproducida en la base R14 congelada
+  (3d82a75) antes de tocar nada: la prueba no pudo pasar nunca en el checkout
+  exacto. Con el módulo real cargado, pasa.
+
+Tests: pruebas/test_v15_10_1_r15_red_segura.cjs (unidad + cableado; RED antes
+del cableado: «el polling de proceso sigue con setInterval solapable»).
+Node: 34/34 archivos .cjs verdes. Python: 822 passed / 13 failed / 1 skipped
+(13 = obsoletos V15.9 conocidos; cero regresiones).
+Pendiente documentado: LRU backend de /api/video/frame y revisión de
+Cache-Control no-store (parte de la recomendación MEDIA-09) se difieren a
+R16: con cancelación+debounce el límite de 1 petición activa ya se cumple y
+no-store evita servir frames viejos tras un reanálisis.

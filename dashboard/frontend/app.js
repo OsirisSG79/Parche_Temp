@@ -9,7 +9,25 @@
 
 const { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback } = React;
 const html = htm.bind(React.createElement);
+
+// R15.2 (MEDIO-05): la insignia «NO CONFIRMADO» se construye como elemento
+// REAL (html`` anidado). Interpolar la cadena "<strong>…</strong>" dentro de
+// un template la renderiza como texto literal: el usuario veía las etiquetas.
+function maximoNoConfirmadoBadge(estadoMaxInflado, t) {
+  if (!estadoMaxInflado || estadoMaxInflado === "maximo_inflado_estimado") return null;
+  const detalleEstado = estadoMaxInflado === "sin_maximo_defendible"
+    ? t("sin máximo defendible") : t("máximo visible observado");
+  return html` · <strong>${t("NO CONFIRMADO")}</strong> (${detalleEstado})`;
+}
+
+// R15.2 (ALTO-04): detección del rechazo explícito por CAS del documento
+// (409 «recarga…»). Sirve para refrescar el detalle tras un conflicto.
+function esConflictoRevision(mensaje) {
+  return /recarga/i.test(String(mensaje || ""));
+}
 const geometriaVisor = window.VMatrixVisorPrecision;
+// R15 (MEDIA-08/09/13): capa de red segura (sondeo serial, secuencias, 404).
+const RedSegura = window.VMatrixRedSegura;
 const t = (texto) => window.OCR_I18N?.t?.(texto) || texto;
 function actualizarZoomAnclado(elemento, evento, actualizar) {
   if (geometriaVisor?.zoomAtPointer) return geometriaVisor.zoomAtPointer(elemento, evento, actualizar);
@@ -34,9 +52,18 @@ function usarFallbackImagen(evento, alternativa = null) {
   img.title = "No se pudo cargar esta imagen. Revisa la raíz del lote o vuelve a procesar si los archivos fueron movidos.";
 }
 
-async function pedirJSON(url, signal) {
+async function pedirJSON(url, signal, opciones) {
   const r = await fetch(url, { signal });
-  if (r.status === 404) return null; // sin datos procesados aún
+  if (r.status === 404) {
+    // R15 (MEDIA-13): null sólo donde «sin datos todavía» es legítimo.
+    // En recursos concretos se lanza error para que la pantalla limpie su
+    // estado dependiente en vez de conservar información anterior.
+    if (RedSegura?.lanzar404(opciones)) {
+      const cuerpo = await r.json().catch(() => ({}));
+      throw new Error(typeof cuerpo?.detail === "string" ? cuerpo.detail : "HTTP 404");
+    }
+    return null; // sin datos procesados aún
+  }
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
@@ -57,6 +84,69 @@ async function enviarJSON(url, datos) {
     throw new Error(mensaje);
   }
   return cuerpo;
+}
+
+function EstadoRecuperacion() {
+  // R15.6 (MEDIO-05): flujo PÚBLICO de recuperación — lista los bloqueos
+  // durables por estado potencialmente inconsistente, anuncia el MODO
+  // RECUPERACIÓN (registro durable no fiable) y permite resolverlos con
+  // confirmación explícita de la verificación manual. Nunca pide borrar
+  // archivos a mano.
+  const [estado, setEstado] = useState(null);
+  const [resolviendo, setResolviendo] = useState(null);
+  useEffect(() => {
+    let cancelado = false, temporizador;
+    async function consultar() {
+      try {
+        const datos = await pedirJSON("/api/recuperacion/inconsistencias");
+        if (!cancelado) setEstado(datos);
+      } catch (_) { /* backend reiniciando o sin ruta: se reintenta */ }
+      if (!cancelado) temporizador = setTimeout(consultar, 5000);
+    }
+    consultar();
+    return () => { cancelado = true; clearTimeout(temporizador); };
+  }, []);
+  if (!estado) return null;
+  const entradas = estado.inconsistencias || [];
+  const modo = estado.modo_recuperacion;
+  if (!modo && !entradas.length) return null;
+  async function resolver(recurso, esModo) {
+    const usuario = (window.prompt(t("Usuario que verifica y resuelve el bloqueo"), "dashboard") || "").trim();
+    if (!usuario) return;
+    const confirmado = window.confirm(esModo
+      ? t("¿Confirmas que verificaste el documento y los almacenes y que el registro durable ya es escribible? Se limpiará el MODO RECUPERACIÓN.")
+      : t("¿Confirmas que verificaste el documento de resultados y los almacenes de aprendizaje/revisiones de este recurso? Se resolverá el bloqueo."));
+    if (!confirmado) return;
+    setResolviendo(recurso);
+    try {
+      const ruta = esModo
+        ? "/api/recuperacion/modo-recuperacion/resolver"
+        : "/api/recuperacion/inconsistencias/" + recurso.split("/").map(encodeURIComponent).join("/") + "/resolver";
+      await enviarJSON(ruta, { usuario, confirmo_verificacion: true });
+      setEstado(await pedirJSON("/api/recuperacion/inconsistencias"));
+    } catch (e) {
+      window.alert(e?.message || t("No se pudo resolver el bloqueo."));
+    } finally { setResolviendo(null); }
+  }
+  return html`<div class="aviso estado-recuperacion notificacion-actividad" role="alert" aria-live="assertive">
+    <div class="notificacion-cabecera"><strong>${modo
+      ? t("MODO RECUPERACIÓN: el registro de inconsistencias no es fiable")
+      : t("Bloqueos por estado potencialmente inconsistente")}</strong></div>
+    <div class="contenido-notificacion">
+      ${modo && html`<span class="mono">${modo.motivo || ""} · ${modo.fecha || ""}</span>`}
+      ${entradas.map(e => html`<div class="entrada-inconsistencia" key=${e.recurso}>
+        <span class="mono">${e.recurso}</span>
+        <span>${t("operación")} «${e.operacion}» · ${e.fecha}</span>
+        <span>${e.detalle}</span>
+        <button type="button" class="boton-resolver-inconsistencia" disabled=${resolviendo === e.recurso}
+          onClick=${() => resolver(e.recurso, false)}>
+          ${resolviendo === e.recurso ? t("Resolviendo…") : t("Verificado, resolver bloqueo")}</button>
+      </div>`)}
+      ${modo && !entradas.length && html`<button type="button" class="boton-resolver-inconsistencia"
+        disabled=${resolviendo === "(modo)"} onClick=${() => resolver("(modo)", true)}>
+        ${resolviendo === "(modo)" ? t("Resolviendo…") : t("Verificado, limpiar MODO RECUPERACIÓN")}</button>`}
+    </div>
+  </div>`;
 }
 
 function useApi(ruta, deps) {
@@ -462,6 +552,17 @@ function EstadoError({ mensaje = "No fue posible cargar el dashboard." }) {
   </div>`;
 }
 
+/* R15.4 (MEDIUM-03): aviso visible cuando el listado viene de una
+   recuperación de checkpoint (el documento oficial no existe). Los parciales
+   nunca deben presentarse como resultados actuales sin comunicarlo. */
+function AvisoCheckpointRecuperacion({ fuente }) {
+  if (fuente !== "checkpoint_recuperacion") return null;
+  return html`<div class="aviso aviso-checkpoint" role="status" aria-live="polite">
+    <strong>${t("Vista de recuperación")}</strong>
+    ${t("No existe el documento oficial de resultados; estas filas provienen del checkpoint de una corrida en curso o recuperable.")}
+  </div>`;
+}
+
 /* ----------------------------- Vistas ----------------------------- */
 
 function MatrizApertura({ matriz, colores }) {
@@ -514,6 +615,7 @@ function MatrizApertura({ matriz, colores }) {
     item?.duracion_llenado_estimada_ms != null && `Llenado visual estimado: ${Number(item.duracion_llenado_estimada_ms).toFixed(3)} ms`,
     item?.tiempo_max_inflado_estimado_ms != null && `Máximo inflado estimado: ${Number(item.tiempo_max_inflado_estimado_ms).toFixed(3)} ms desde inicio de video`,
     item?.duracion_hasta_max_inflado_ms != null && `Breakout→máximo: ${Number(item.duracion_hasta_max_inflado_ms).toFixed(3)} ms`,
+    item?.max_inflado_estado && item.max_inflado_estado !== "maximo_inflado_estimado" && `Máximo inflado: ${t("NO CONFIRMADO")} (${item.max_inflado_estado})${item.tiempo_max_inflado_no_confirmado_ms != null ? ` · ${Number(item.tiempo_max_inflado_no_confirmado_ms).toFixed(3)} ms observados` : ""}`,
     item?.max_inflado_anomalias?.length && `Anomalías despliegue: ${item.max_inflado_anomalias.join(", ")}`,
     item?.razones_apertura?.length && `Evidencia: ${item.razones_apertura.join("; ")}`,
   ].filter(Boolean).join(" · ");
@@ -925,26 +1027,59 @@ function VistaCarga() {
       .catch(() => { setProyectosRegistrados([]); setSugerenciasProyecto([]); });
   }, []);
 
+  // R15.1 (MEDIO-07): UNA sola guarda de secuencia por recurso, compartida
+  // entre los refrescos manuales y el sondeo serial: cualquier respuesta
+  // rezagada (inicial o manual) se descarta frente a la más reciente.
+  const guardaEstadoRef = useRef(null);
+  if (!guardaEstadoRef.current) guardaEstadoRef.current = RedSegura.crearGuardaSecuencia();
+  const guardaReanalisisRef = useRef(null);
+  if (!guardaReanalisisRef.current) guardaReanalisisRef.current = RedSegura.crearGuardaSecuencia();
+
   const refrescar = useCallback(() => {
+    const guarda = guardaEstadoRef.current;
+    const token = guarda.siguiente();
     pedirJSON("/api/pipeline/estado")
-      .then((dato) => { setEstado(dato); setErrorEstado(null); })
-      .catch((e) => setErrorEstado(e));
+      .then((dato) => { if (guarda.esVigente(token)) { setEstado(dato); setErrorEstado(null); } })
+      .catch((e) => { if (guarda.esVigente(token)) setErrorEstado(e); });
   }, []);
 
   const refrescarReanalisisVideos = useCallback(() => {
+    const guarda = guardaReanalisisRef.current;
+    const token = guarda.siguiente();
     pedirJSON("/api/video/reanalisis/estado")
-      .then((dato) => { setReanalisisVideos(dato); setErrorReanalisisVideos(null); })
-      .catch((e) => setErrorReanalisisVideos(e));
+      .then((dato) => { if (guarda.esVigente(token)) { setReanalisisVideos(dato); setErrorReanalisisVideos(null); } })
+      .catch((e) => { if (guarda.esVigente(token)) setErrorReanalisisVideos(e); });
   }, []);
 
   useEffect(() => {
-    refrescar();
     refrescarPlantillas();
     refrescarProyectos();
-    refrescarReanalisisVideos();
-    const id = setInterval(() => { refrescar(); refrescarReanalisisVideos(); }, 1200);
-    return () => clearInterval(id);
-  }, [refrescar, refrescarPlantillas, refrescarProyectos, refrescarReanalisisVideos]);
+    // R15 (MEDIA-08) + R15.1 (MEDIO-07): polling SERIAL — la siguiente
+    // consulta se programa sólo cuando la anterior terminó, y una guarda de
+    // secuencia descarta respuestas rezagadas (nunca «retroceden» el
+    // porcentaje/fase en pantalla). El sondeo ejecuta TAMBIÉN la primera
+    // consulta (iniciar() dispara la tarea de inmediato): ya no existe un
+    // refrescar() inicial sin guarda en paralelo al primer ciclo.
+    const guardaEstado = guardaEstadoRef.current;
+    const guardaReanalisis = guardaReanalisisRef.current;
+    const sondeo = RedSegura.crearSondeoSerial({
+      intervaloMs: 1200,
+      tarea: async () => {
+        const tokenEstado = guardaEstado.siguiente();
+        const tokenReanalisis = guardaReanalisis.siguiente();
+        await Promise.allSettled([
+          pedirJSON("/api/pipeline/estado")
+            .then((dato) => { if (guardaEstado.esVigente(tokenEstado)) { setEstado(dato); setErrorEstado(null); } })
+            .catch((e) => { if (guardaEstado.esVigente(tokenEstado)) setErrorEstado(e); }),
+          pedirJSON("/api/video/reanalisis/estado")
+            .then((dato) => { if (guardaReanalisis.esVigente(tokenReanalisis)) { setReanalisisVideos(dato); setErrorReanalisisVideos(null); } })
+            .catch((e) => { if (guardaReanalisis.esVigente(tokenReanalisis)) setErrorReanalisisVideos(e); }),
+        ]);
+      },
+    });
+    sondeo.iniciar();
+    return () => sondeo.detener();
+  }, []);
 
   useEffect(() => {
     try { localStorage.setItem("ocr_idiomas_exportacion", JSON.stringify(idiomasExportacion)); } catch (_) {}
@@ -1862,16 +1997,34 @@ function VistaTabla() {
   const limite = 100;
   const [config, , errorConfig] = useApi("/api/config");
   const rutaFilas = `/api/pruebas?q=${encodeURIComponent(consultaEstable)}&estado=${encodeURIComponent(estado)}&limit=${limite}&offset=${pagina * limite}&incluir_ocultos=${mostrarOcultos}`;
-  const [filas, setFilas, errorFilas] = useApi(rutaFilas,
-    [consultaEstable, estado, pagina, mostrarOcultos]);
+  // R15.1 (MEDIO-07): fuente única por recurso — la primera consulta la
+  // ejecuta el propio sondeo serial (con guarda); sin useApi inicial paralelo.
+  const [filas, setFilas] = useState(undefined); // undefined = cargando
+  const [errorFilas, setErrorFilas] = useState(null);
   const colores = (config && config.colores) || {};
   const refTabla = useRef(null);
 
   useEffect(() => {
-    const id = setInterval(() => {
-      pedirJSON(rutaFilas).then(setFilas).catch(() => {});
-    }, 1200);
-    return () => clearInterval(id);
+    // R15 (MEDIA-08) + R15.1 (MEDIO-07): polling serial del listado con
+    // guarda de secuencia; ejecuta también la primera consulta. Una
+    // respuesta antigua nunca sobrescribe a la nueva.
+    setFilas(undefined);
+    setErrorFilas(null);
+    const guarda = RedSegura.crearGuardaSecuencia();
+    const sondeo = RedSegura.crearSondeoSerial({
+      intervaloMs: 1200,
+      tarea: async () => {
+        const token = guarda.siguiente();
+        try {
+          const dato = await pedirJSON(rutaFilas);
+          if (guarda.esVigente(token)) { setFilas(dato); setErrorFilas(null); }
+        } catch (e) {
+          if (guarda.esVigente(token)) { setErrorFilas(e); setFilas(null); }
+        }
+      },
+    });
+    sondeo.iniciar();
+    return () => sondeo.detener();
   }, [rutaFilas]);
 
   useEffect(() => {
@@ -1900,7 +2053,7 @@ function VistaTabla() {
 
   if (config === undefined) return html`<${CargandoKpis} />`;
   if (filas === undefined) return html`<div class="tarjeta"><div class="esqueleto"></div></div>`;
-  if (errorConfig || errorFilas) return html`<${EstadoError} />`;
+  if (errorConfig || errorFilas) return html`<${EstadoError} mensaje=${(errorFilas || errorConfig)?.message} />`;
   if (filas === null) return html`<${EstadoVacio} />`;
 
   const celda = (valor, clase) =>
@@ -1921,6 +2074,7 @@ function VistaTabla() {
 
   return html`
     <div ref=${refTabla} onKeyDown=${alPulsarTecla}>
+    <${AvisoCheckpointRecuperacion} fuente=${filas?.fuente} />
     <div class="barra-filtros">
       <input class="campo" type="search" placeholder=${t("Buscar por identificador o nomenclatura…")}
         aria-label="Buscar en la tabla"
@@ -3266,7 +3420,16 @@ function fpsGrabacionOverlayVideo(video) {
   return Number.isFinite(valor) && valor > 0 ? valor : 0;
 }
 
-function TarjetaVideoAirbag({ video, pruebaId, onSaved, bloqueado = false }) {
+function TarjetaVideoAirbag({ video, pruebaId, onSaved, bloqueado = false, revisionDocumento = null }) {
+  // R15 (MEDIA-14): las mutaciones envían expected_revision (CAS). Si otra
+  // pestaña cambió el documento, el backend responde 409 «recarga antes de
+  // guardar» y esta pantalla recarga el detalle en vez de pintar datos viejos.
+  async function falloMutacion(e) {
+    setMensaje({ok:false, texto:e.message});
+    if (/recarga antes de guardar/i.test(String(e?.message || "")) && onSaved) {
+      try { await onSaved({conflicto_revision: true}); } catch (_) {}
+    }
+  }
   const frameBase = Number(video.revision_manual?.frame_index ?? video.frame_evento ?? 0);
   const fpsOverlayBase = fpsGrabacionOverlayVideo(video);
   const fpsBase = fpsOverlayBase || Number(video.fps_grabacion || video.fps || 0);
@@ -3408,14 +3571,48 @@ function TarjetaVideoAirbag({ video, pruebaId, onSaved, bloqueado = false }) {
   const rutaFrameSolicitada = `/api/video/frame?ruta=${encodeURIComponent(video.ruta || "")}&frame=${Math.max(0, Math.round(frame || 0))}`;
   const [rutaFrameMostrada, setRutaFrameMostrada] = useState(rutaFrameSolicitada);
   const [errorFrame, setErrorFrame] = useState(false);
+  const urlBlobAnteriorRef = useRef(null);
   useEffect(() => {
+    // R15 (MEDIA-09): fetch + AbortController + Blob URL con debounce corto:
+    // la descarga/decodificación del frame anterior se CANCELA de verdad (no
+    // sólo se ignora) al cambiar de cuadro; como máximo una petición activa
+    // por tarjeta. El doble búfer se conserva: el cuadro anterior sigue
+    // visible hasta que el nuevo terminó de decodificarse.
     let vigente = true;
-    const img = new Image();
-    img.onload = () => { if (vigente) { setRutaFrameMostrada(rutaFrameSolicitada); setErrorFrame(false); } };
-    img.onerror = () => { if (vigente) setErrorFrame(true); };
-    img.src = rutaFrameSolicitada;
-    return () => { vigente = false; };
+    const controlador = new AbortController();
+    const temporizador = setTimeout(async () => {
+      let urlBlob = null;
+      try {
+        const r = await fetch(rutaFrameSolicitada, { signal: controlador.signal });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const blob = await r.blob();
+        if (!vigente) return;
+        urlBlob = URL.createObjectURL(blob);
+        const img = new Image();
+        img.onload = () => {
+          if (!vigente) { URL.revokeObjectURL(urlBlob); return; }
+          if (urlBlobAnteriorRef.current) URL.revokeObjectURL(urlBlobAnteriorRef.current);
+          urlBlobAnteriorRef.current = urlBlob;
+          setRutaFrameMostrada(urlBlob);
+          setErrorFrame(false);
+        };
+        img.onerror = () => {
+          if (!vigente) return;
+          URL.revokeObjectURL(urlBlob);
+          setErrorFrame(true);
+        };
+        img.src = urlBlob;
+      } catch (e) {
+        if (e?.name === "AbortError" || !vigente) return;
+        if (urlBlob) URL.revokeObjectURL(urlBlob);
+        setErrorFrame(true);
+      }
+    }, 60);
+    return () => { vigente = false; clearTimeout(temporizador); controlador.abort(); };
   }, [rutaFrameSolicitada]);
+  useEffect(() => () => {
+    if (urlBlobAnteriorRef.current) URL.revokeObjectURL(urlBlobAnteriorRef.current);
+  }, []);
   const proporcion = Number(video.ancho) > 0 && Number(video.alto) > 0 ? `${Number(video.ancho)} / ${Number(video.alto)}` : "4 / 3";
 
   function tiempoProvisional(indice) {
@@ -3434,7 +3631,7 @@ function TarjetaVideoAirbag({ video, pruebaId, onSaved, bloqueado = false }) {
         const q = new URLSearchParams({
           prueba_id: String(pruebaId), video_id: String(video.id), frame: String(Math.max(0, Math.round(frame || 0))),
         });
-        const info = await pedirJSON(`/api/video/tiempo-frame?${q.toString()}`, controlador.signal);
+        const info = await pedirJSON(`/api/video/tiempo-frame?${q.toString()}`, controlador.signal, { permitir404: false });
         if (!info) return;
         const valor = info.tiempo_ms == null ? NaN : Number(info.tiempo_ms);
         const seguro = Number.isFinite(valor) ? valor : tiempoProvisional(frame);
@@ -3621,6 +3818,7 @@ function TarjetaVideoAirbag({ video, pruebaId, onSaved, bloqueado = false }) {
         tiempo_ms: estado === "sin_evento" ? null : Number(tiempo), estado,
         usuario: "dashboard",
         bbox_evento_norm: estado === "confirmado" && Array.isArray(bboxNacimientoVisible) ? bboxNacimientoVisible : null,
+        expected_revision: revisionDocumento ?? null,
       });
       if (r.tiempo_resuelto) {
         setInfoTiempo(r.tiempo_resuelto);
@@ -3639,7 +3837,7 @@ function TarjetaVideoAirbag({ video, pruebaId, onSaved, bloqueado = false }) {
         : aprendido ? `Punto de apertura confirmado y añadido al aprendizaje preciso (microzona + F-3…F+3).${ajusteServidor}`
         : `Punto de apertura confirmado.${ajusteServidor}${avisoAprendizaje}`});
       if (onSaved) await onSaved(r);
-    } catch (e) { setMensaje({ok:false, texto:e.message}); }
+    } catch (e) { await falloMutacion(e); }
     finally { setGuardando(false); }
   }
 
@@ -3650,10 +3848,11 @@ function TarjetaVideoAirbag({ video, pruebaId, onSaved, bloqueado = false }) {
       const r = await enviarJSON("/api/video/maximo", {
         prueba_id: pruebaId, video_id: video.id,
         frame_index: Math.max(0, Math.round(frame)), usuario: "dashboard",
+        expected_revision: revisionDocumento ?? null,
       });
       setMensaje({ok:true, texto:`Máximo despliegue visible confirmado: cuadro ${r.despliegue_maximo.frame_index}, ${r.despliegue_maximo.tiempo_ms} ms. Se exporta por separado; no cambia apertura ni inflado completo.`});
       if (onSaved) await onSaved(r);
-    } catch (e) { setMensaje({ok:false, texto:e.message}); }
+    } catch (e) { await falloMutacion(e); }
     finally { setGuardando(false); }
   }
 
@@ -3734,11 +3933,12 @@ function TarjetaVideoAirbag({ video, pruebaId, onSaved, bloqueado = false }) {
         bbox_norm: zonaElegida.map(v => Math.round(Number(v) * 1000000) / 1000000),
         frame_index: Math.round(Number(frame || 0)), tipo_camara: tipoCamara,
         usuario: "dashboard",
+        expected_revision: revisionDocumento ?? null,
       });
       setMensaje({ok:true, texto:`Zona guardada y bloqueada${r.perfil?.tipo_camara ? ` para ${r.perfil.tipo_camara}` : ""}. El video se volvió a analizar mirando exactamente ahí.`});
       setModoZona(false); setZonaTemporal(null);
       if (onSaved) await onSaved(r);
-    } catch (e) { setMensaje({ok:false, texto:e.message}); }
+    } catch (e) { await falloMutacion(e); }
     finally { setGuardando(false); }
   }
   // V15.9.1 (A1): flujo real de restauración de una ROI ya guardada.
@@ -3749,11 +3949,12 @@ function TarjetaVideoAirbag({ video, pruebaId, onSaved, bloqueado = false }) {
     try {
       const r = await enviarJSON("/api/video/zona-revertir", {
         prueba_id: pruebaId, video_id: video.id, indice, usuario: "dashboard",
+        expected_revision: revisionDocumento ?? null,
       });
       setMensaje({ok:true, texto:"ROI revertida a la versión anterior del historial. El video se volvió a analizar con esa región. La ROI desplazada quedó en el historial (reversible)."});
       setModoZona(false); setZonaTemporal(null);
       if (onSaved) await onSaved(r);
-    } catch (e) { setMensaje({ok:false, texto:e.message}); }
+    } catch (e) { await falloMutacion(e); }
     finally { setGuardando(false); setRevertiendoRoi(false); }
   }
 
@@ -3772,11 +3973,16 @@ function TarjetaVideoAirbag({ video, pruebaId, onSaved, bloqueado = false }) {
     }
     setGuardando(true); setMensaje(null);
     try {
+      let revisionActual = revisionDocumento ?? null;
       const zonaResp = await enviarJSON("/api/video/zona-aprendizaje", {
         prueba_id: pruebaId, video_id: video.id,
         bbox_norm: zonaElegida.map(v => Math.round(Number(v) * 1000000) / 1000000),
         frame_index: Math.round(Number(frame || 0)), tipo_camara: tipoCamara, usuario: "dashboard",
+        expected_revision: revisionActual,
       });
+      // R15 (MEDIA-14): el flujo encadena mutaciones; cada respuesta trae la
+      // nueva revisión del documento y la siguiente operación la usa.
+      if (zonaResp?.revision_documento != null) revisionActual = zonaResp.revision_documento;
       let nacimientoExacto = zonaNacimiento;
       if (!Array.isArray(nacimientoExacto)) {
         const afinado = await enviarJSON("/api/video/refinar-zona-apertura", {
@@ -3794,6 +4000,7 @@ function TarjetaVideoAirbag({ video, pruebaId, onSaved, bloqueado = false }) {
         tiempo_ms: Number(tiempo), estado: "confirmado", usuario: "dashboard",
         comentario: "Supervisión combinada: ROI general + microzona exacta + primer cuadro de apertura",
         bbox_evento_norm: Array.isArray(nacimientoExacto) ? nacimientoExacto : null,
+        expected_revision: revisionActual,
       });
       if (revision.tiempo_resuelto) {
         setInfoTiempo(revision.tiempo_resuelto);
@@ -3807,7 +4014,7 @@ function TarjetaVideoAirbag({ video, pruebaId, onSaved, bloqueado = false }) {
       setMensaje({ok:true, texto:`Aprendizaje guardado: la ROI general indica dónde mirar y la microzona marca dónde nace exactamente la bolsa en el cuadro ${Math.round(frame)}. F-3…F+3 se guardó recortado alrededor de ese nacimiento.`});
       setModoZona(false); setZonaTemporal(null); setModoNacimientoManual(false);
       if (onSaved) await onSaved({zona: zonaResp, revision});
-    } catch (e) { setMensaje({ok:false, texto:e.message}); }
+    } catch (e) { await falloMutacion(e); }
     finally { setGuardando(false); }
   }
 
@@ -4092,7 +4299,7 @@ function TarjetaVideoAirbag({ video, pruebaId, onSaved, bloqueado = false }) {
             <strong>Máximo despliegue visible</strong>
             <p class="subtitulo-seccion">Después de confirmar la ruptura, avanza hasta el cuadro de mayor despliegue visible y guárdalo aquí. No es el inicio de ruptura ni una medición de volumen o de inflado completo.</p>
             ${video.duracion_llenado_estimada_ms != null && html`<p class="subtitulo-seccion"><strong>Estimación automática de llenado visual:</strong> ${Number(video.duracion_llenado_estimada_ms).toFixed(3)} ms desde el primer onset defendible${video.frame_llenado_estimado != null ? ` · meseta en cuadro ${video.frame_llenado_estimado}` : ""}. No equivale a volumen o presión internos.</p>`}
-            ${video.frame_max_inflado_estimado != null && html`<p class="subtitulo-seccion"><strong>${t("Máximo inflado automático")}:</strong> cuadro ${video.frame_max_inflado_estimado}${video.tiempo_max_inflado_estimado_ms != null ? ` · ${Number(video.tiempo_max_inflado_estimado_ms).toFixed(3)} ms desde inicio del video` : ""}${video.duracion_hasta_max_inflado_ms != null ? ` · breakout→máximo ${Number(video.duracion_hasta_max_inflado_ms).toFixed(3)} ms` : ""}. ${video.anomalías_despliegue?.length ? `Revisar: ${video.anomalías_despliegue.join(", ")}.` : t("Sin anomalías automáticas.")}</p>`}
+            ${video.frame_max_inflado_estimado != null && html`<p class="subtitulo-seccion"><strong>${t("Máximo inflado automático")}:</strong> cuadro ${video.frame_max_inflado_estimado}${video.tiempo_max_inflado_estimado_ms != null ? ` · ${Number(video.tiempo_max_inflado_estimado_ms).toFixed(3)} ms desde inicio del video` : ""}${video.duracion_hasta_max_inflado_ms != null ? ` · breakout→máximo ${Number(video.duracion_hasta_max_inflado_ms).toFixed(3)} ms` : ""}${maximoNoConfirmadoBadge(video.estado_max_inflado, t)}. ${video.anomalías_despliegue?.length ? `Revisar: ${video.anomalías_despliegue.join(", ")}.` : (video.estado_max_inflado && video.estado_max_inflado !== "maximo_inflado_estimado" ? "" : t("Sin anomalías automáticas."))}</p>`}
             <div class="acciones-revision-video">
               ${video.frame_max_inflado_estimado != null && html`<button type="button" class="boton" onClick=${()=>cambiarFrame(Number(video.frame_max_inflado_estimado))} disabled=${guardando}>${t("Ir al máximo automático")}</button>`}
               ${video.frame_llenado_estimado != null && html`<button type="button" class="boton" onClick=${()=>cambiarFrame(Number(video.frame_llenado_estimado))} disabled=${guardando}>Ir a meseta estimada</button>`}
@@ -4137,7 +4344,7 @@ function TarjetaVideoAirbag({ video, pruebaId, onSaved, bloqueado = false }) {
             ? `Primer indicio: cuadro ${video.frame_evento} · evidencia fuerte: cuadro ${video.frame_confirmacion_automatica}` : guion}</dd>
           <dt>Crecimiento observado</dt><dd>${video.crecimiento_ratio != null ? `${Number(video.crecimiento_ratio).toFixed(2)}× en la ventana de confirmación` : guion}</dd>
           <dt>Tiempo de llenado visual</dt><dd>${video.duracion_llenado_estimada_ms != null ? `${Number(video.duracion_llenado_estimada_ms).toFixed(3)} ms · meseta visual estimada${video.frame_llenado_estimado != null ? ` en cuadro ${video.frame_llenado_estimado}` : ""}` : "sin meseta visual defendible todavía"}</dd>
-          <dt>${t("Máximo inflado automático")}</dt><dd>${video.frame_max_inflado_estimado != null ? `cuadro ${video.frame_max_inflado_estimado}${video.tiempo_max_inflado_estimado_ms != null ? ` · ${Number(video.tiempo_max_inflado_estimado_ms).toFixed(3)} ms desde inicio de video` : ""}${video.duracion_hasta_max_inflado_ms != null ? ` · expansión ${Number(video.duracion_hasta_max_inflado_ms).toFixed(3)} ms` : ""}` : t("Sin máximo defendible todavía")}</dd>
+          <dt>${t("Máximo inflado automático")}</dt><dd>${video.frame_max_inflado_estimado != null ? `cuadro ${video.frame_max_inflado_estimado}${video.tiempo_max_inflado_estimado_ms != null ? ` · ${Number(video.tiempo_max_inflado_estimado_ms).toFixed(3)} ms desde inicio de video` : ""}${video.duracion_hasta_max_inflado_ms != null ? ` · expansión ${Number(video.duracion_hasta_max_inflado_ms).toFixed(3)} ms` : ""}${maximoNoConfirmadoBadge(video.estado_max_inflado, t)}` : t("Sin máximo defendible todavía")}</dd>
           <dt>${t("Anomalías automáticas")}</dt><dd>${video.anomalías_despliegue?.length ? video.anomalías_despliegue.join(", ") : t("Ninguna detectada")}</dd>
           <dt>Score de apertura</dt><dd>${video.score_apertura != null ? `${(Number(video.score_apertura)*100).toFixed(1)}%` : guion}</dd>
           <dt>Ejemplos aprendidos</dt><dd>${(video.perfil_evento_aprendido?.ejemplos||0) > 0 ? `${Number(video.perfil_evento_aprendido.ejemplos)} de ${tipoCamara || "esta vista"}` : guion}</dd>
@@ -4153,8 +4360,7 @@ function TarjetaVideoAirbag({ video, pruebaId, onSaved, bloqueado = false }) {
             disabled=${bloqueado||guardando||!modoZona||!zonaTemporal} hidden=${!modoZona}>Guardar solo zona</button>
           <button type="button" class="boton boton-aprender-apertura" onClick=${guardarZonaYApertura}
             disabled=${bloqueado||guardando||cargandoTiempo||localizandoNacimiento||!modoZona||!zonaTemporal||eventoCensuradoVideo} hidden=${!modoZona}
-            title=${eventoCensuradoVideo ? "Evento censurado: guarda la ROI por separado, sin confirmar apertura." : "Guarda la ROI y confirma apertura sólo con evidencia previa del nacimiento."}
-            title="Guarda esta región como zona de interés y el cuadro actual como primer cuadro de apertura">✓ Esta zona + este cuadro = apertura</button>
+            title=${eventoCensuradoVideo ? "Evento censurado: guarda la ROI por separado, sin confirmar apertura." : "Guarda esta región como zona de interés y el cuadro actual como primer cuadro de apertura. Guarda la ROI y confirma la apertura sólo con evidencia previa del nacimiento."}>✓ Esta zona + este cuadro = apertura</button>
           <button type="button" class="boton" onClick=${()=>{setModoZona(false);setZonaTemporal(null);setZonaNacimiento(null);setDetalleNacimiento(null);setModoNacimientoManual(false);}}
             disabled=${guardando} hidden=${!modoZona}>Cancelar</button>
         </div>
@@ -4311,7 +4517,8 @@ function PanelVideosAirbag({ detalle, onSaved, bloqueado = false }) {
     </div>
 
     ${videosVisibles ? html`<div class="lista-videos-airbag">${videos.map(video => html`<${TarjetaVideoAirbag} key=${video.id||video.ruta}
-      video=${video} pruebaId=${detalle.id} onSaved=${onSaved} bloqueado=${bloqueado} />`)}</div>`
+      video=${video} pruebaId=${detalle.id} onSaved=${onSaved} bloqueado=${bloqueado}
+      revisionDocumento=${detalle?.revision_documento ?? null} />`)}</div>`
       : html`<div class="videos-ocultos-resumen">
           <div><strong>Videos ocultos</strong><p class="subtitulo-seccion">La sección está contraída para dejar más espacio al resto del ID.</p></div>
           <button type="button" class="boton" onClick=${() => setVideosVisibles(true)}>Desplegar videos</button>
@@ -4530,6 +4737,16 @@ function VistaDetalle({ nombre }) {
       requestAnimationFrame(() => formulario?.classList.add("destacar-formulario"));
     }, 0);
   }
+  // R15.2 (ALTO-04): ante un conflicto CAS (409) se refresca el detalle para
+  // que el próximo intento envíe la revisión vigente; el borrador del usuario
+  // NO se descarta (nunca perder trabajo humano).
+  async function refrescarTrasConflicto(error) {
+    if (!esConflictoRevision(error?.message)) return false;
+    try {
+      setDetalle(await pedirJSON(`/api/pruebas/${encodeURIComponent(nombre)}`, undefined, { permitir404: false }));
+    } catch (_) {}
+    return true;
+  }
   async function confirmarCorreccion(e, accionForzada = null) {
     e.preventDefault();
     const versionEnviada = versionBorradorRef.current;
@@ -4549,8 +4766,9 @@ function VistaDetalle({ nombre }) {
         campo_destino: campoDestino || null,
         estrategia_ocr: estrategiaOcrPendiente,
         accion: accionEfectiva,
+        expected_revision: detalle?.revision_documento ?? null,
       });
-      const actualizado = await pedirJSON(`/api/pruebas/${encodeURIComponent(nombre)}`);
+      const actualizado = await pedirJSON(`/api/pruebas/${encodeURIComponent(nombre)}`, undefined, { permitir404: false });
       setDetalle(actualizado);
       const imagenActualizada = (actualizado.imagenes || []).find(i=>i.id===imagenSeleccionada?.id);
       const guardada = unidadesOcr(imagenActualizada?.resultado_ocr || {}).find(u=>
@@ -4577,6 +4795,7 @@ function VistaDetalle({ nombre }) {
       pedirJSON("/api/aprendizaje").then(setAprendizaje).catch(() => {});
     } catch (error) {
       setResultadoCorreccion({ ok: false, mensaje: error.message });
+      await refrescarTrasConflicto(error);
     } finally {
       setGuardandoCorreccion(false);
     }
@@ -4589,7 +4808,7 @@ function VistaDetalle({ nombre }) {
         prueba_id: detalle.id, imagen_id: imagenSeleccionada.id,
         bbox: unidad.bbox, restaurar,
       });
-      setDetalle(await pedirJSON(`/api/pruebas/${encodeURIComponent(nombre)}`));
+      setDetalle(await pedirJSON(`/api/pruebas/${encodeURIComponent(nombre)}`, undefined, { permitir404: false }));
       setResultadoCorreccion({ok: true, resultado});
       setUnidadId("");
     } catch (e) { setResultadoCorreccion({ok: false, mensaje: e.message}); }
@@ -4604,7 +4823,7 @@ function VistaDetalle({ nombre }) {
       const resultado = await enviarJSON("/api/aprendizaje/no-texto-lote", {
         prueba_id: detalle.id, imagen_id: imagen.id, bboxes,
       });
-      const actualizado = await pedirJSON(`/api/pruebas/${encodeURIComponent(nombre)}`);
+      const actualizado = await pedirJSON(`/api/pruebas/${encodeURIComponent(nombre)}`, undefined, { permitir404: false });
       setDetalle(actualizado);
       setResultadoCorreccion({ok: true, resultado});
       if (imagen.id === imagenSeleccionada?.id) {
@@ -4621,7 +4840,7 @@ function VistaDetalle({ nombre }) {
   async function cambiarRevision(estado) {
     try {
       await enviarJSON("/api/revisiones", { tipo: "carpeta", item_id: detalle.id, estado });
-      const actualizado = await pedirJSON(`/api/pruebas/${encodeURIComponent(nombre)}`);
+      const actualizado = await pedirJSON(`/api/pruebas/${encodeURIComponent(nombre)}`, undefined, { permitir404: false });
       setDetalle(actualizado);
       setModoEdicion(false);
     } catch (error) {
@@ -4646,7 +4865,7 @@ function VistaDetalle({ nombre }) {
         proponer_entrenamiento: true,
       });
       setResultadoRegion({ ok: true, resultado });
-      const actualizado = await pedirJSON(`/api/pruebas/${encodeURIComponent(nombre)}`);
+      const actualizado = await pedirJSON(`/api/pruebas/${encodeURIComponent(nombre)}`, undefined, { permitir404: false });
       setDetalle(actualizado);
       setRegion(null); setAnguloRegion(0); setPoligonoRegion(null);
       setTextoRegion("");
@@ -4663,12 +4882,14 @@ function VistaDetalle({ nombre }) {
       const resultado = await enviarJSON("/api/aprendizaje/rotaciones", {
         tipo: "carpeta", prueba_id: detalle.id, imagen_id: imagen.id, grados,
         usar_automatico: usarAutomatico,
+        expected_revision: detalle?.revision_documento ?? null,
       });
       setResultadoCorreccion({ ok: true, rotacion: true, resultado });
-      setDetalle(await pedirJSON(`/api/pruebas/${encodeURIComponent(nombre)}`));
+      setDetalle(await pedirJSON(`/api/pruebas/${encodeURIComponent(nombre)}`, undefined, { permitir404: false }));
       pedirJSON("/api/aprendizaje").then(setAprendizaje).catch(() => {});
     } catch (error) {
       setResultadoCorreccion({ ok: false, mensaje: error.message });
+      await refrescarTrasConflicto(error);
     }
   }
   async function marcarSinDatos(imagen, restaurar = false) {
@@ -4676,10 +4897,11 @@ function VistaDetalle({ nombre }) {
     try {
       const resultado = await enviarJSON(restaurar ? "/api/imagenes/con-texto" : "/api/imagenes/sin-datos", {
         tipo: "carpeta", prueba_id: detalle.id, imagen_id: imagen.id,
-        motivo: motivoSinDatos.trim() || null,
+        motivo: motivoSinDatos.trim() || null, usuario: "dashboard",
+        expected_revision: detalle?.revision_documento ?? null,
       });
       setResultadoCorreccion({ ok: true, sinDatos: true, resultado });
-      const actualizado = await pedirJSON(`/api/pruebas/${encodeURIComponent(nombre)}`);
+      const actualizado = await pedirJSON(`/api/pruebas/${encodeURIComponent(nombre)}`, undefined, { permitir404: false });
       if (!restaurar && ocultarSinTexto) {
         const lista = actualizado.imagenes?.length ? actualizado.imagenes : [actualizado.etiqueta, actualizado.referencia].filter(Boolean);
         const restantes = imagenesParaRevisar(lista, ocultarVerificadas, true);
@@ -4690,6 +4912,7 @@ function VistaDetalle({ nombre }) {
       setDetalle(actualizado);
     } catch (error) {
       setResultadoCorreccion({ ok: false, mensaje: error.message });
+      await refrescarTrasConflicto(error);
     }
   }
   async function verificarImagen(imagen) {
@@ -4708,9 +4931,10 @@ function VistaDetalle({ nombre }) {
     setResultadoCorreccion(null);
     try {
       const resultado = await enviarJSON("/api/imagenes/verificar", {
-        prueba_id: detalle.id, imagen_id: imagen.id,
+        prueba_id: detalle.id, imagen_id: imagen.id, usuario: "dashboard",
+        expected_revision: detalle?.revision_documento ?? null,
       });
-      const actualizado = await pedirJSON(`/api/pruebas/${encodeURIComponent(nombre)}`);
+      const actualizado = await pedirJSON(`/api/pruebas/${encodeURIComponent(nombre)}`, undefined, { permitir404: false });
       const lista = actualizado.imagenes?.length ? actualizado.imagenes : [actualizado.etiqueta, actualizado.referencia].filter(Boolean);
       const imagenActualizada = lista.find(i => i.id === imagen.id);
       const unidadesActualizadas = unidadesOcr(imagenActualizada?.resultado_ocr || {});
@@ -4731,6 +4955,7 @@ function VistaDetalle({ nombre }) {
       setDetalle(actualizado);
     } catch (error) {
       setResultadoCorreccion({ ok: false, mensaje: error.message });
+      await refrescarTrasConflicto(error);
     } finally { setGuardandoImagen(false); }
   }
   async function atenderAlerta(alerta) {
@@ -4738,7 +4963,7 @@ function VistaDetalle({ nombre }) {
       await enviarJSON("/api/alertas/atender", {
         tipo: "carpeta", item_id: detalle.id, alerta_id: alerta.id,
       });
-      setDetalle(await pedirJSON(`/api/pruebas/${encodeURIComponent(nombre)}`));
+      setDetalle(await pedirJSON(`/api/pruebas/${encodeURIComponent(nombre)}`, undefined, { permitir404: false }));
     } catch (error) {
       setResultadoCorreccion({ ok: false, mensaje: error.message });
     }
@@ -4785,11 +5010,13 @@ function VistaDetalle({ nombre }) {
     try {
       const resultado = await enviarJSON(
         `/api/casos/${encodeURIComponent(detalle.id)}/campos/${encodeURIComponent(campoManual)}`,
-        { valor: valorManual.trim(), usuario: "dashboard" });
+        { valor: valorManual.trim(), usuario: "dashboard",
+          expected_revision: detalle?.revision_documento ?? null });
       setResultadoCorreccion({ ok: true, campoManual: true, resultado });
-      setDetalle(await pedirJSON(`/api/pruebas/${encodeURIComponent(nombre)}`));
+      setDetalle(await pedirJSON(`/api/pruebas/${encodeURIComponent(nombre)}`, undefined, { permitir404: false }));
     } catch (error) {
       setResultadoCorreccion({ ok: false, mensaje: error.message });
+      await refrescarTrasConflicto(error);
     }
   }
   async function entrenarVisual() {
@@ -5007,7 +5234,7 @@ function VistaDetalle({ nombre }) {
         visorRegion=${html`<${SelectorRegion} key=${`${imagenSeleccionada.id}-${revisionEditor}`} item=${imagenSeleccionada} valor=${region} onChange=${setRegion}
           anguloSeleccion=${anguloRegion} onAnguloSeleccion=${setAnguloRegion} poligonoSeleccionado=${poligonoRegion} onPoligonoSeleccion=${setPoligonoRegion} permitirRotarSeleccion=${true}
           textoRegion=${textoRegion} onTextoRegion=${setTextoRegion}
-          pruebaId=${detalle.id} onZonaActualizada=${async () => setDetalle(await pedirJSON(`/api/pruebas/${encodeURIComponent(nombre)}`))}
+          pruebaId=${detalle.id} onZonaActualizada=${async () => setDetalle(await pedirJSON(`/api/pruebas/${encodeURIComponent(nombre)}`, undefined, { permitir404: false }))}
           onSelectText=${(unidad) => seleccionarUnidad(imagenSeleccionada, unidad)}
           correccionAbierta=${mostrarCorreccion} onSeleccionarRegion=${cerrarCorreccionActiva}
           panelCorreccion=${html`<div>
@@ -5192,7 +5419,7 @@ function VistaDetalle({ nombre }) {
     </div>`}
 
     <${PanelVideosAirbag} detalle=${detalle} bloqueado=${revisionCompletada}
-      onSaved=${async () => setDetalle(await pedirJSON(`/api/pruebas/${encodeURIComponent(nombre)}`))} />
+      onSaved=${async () => setDetalle(await pedirJSON(`/api/pruebas/${encodeURIComponent(nombre)}`, undefined, { permitir404: false }))} />
 
     <div class="selector-imagenes" aria-label="Imágenes del ID">
       ${imagenesVisibles.map((imagen) => {
@@ -5350,6 +5577,7 @@ function App() {
     <div class="centro-notificaciones" aria-label="Notificaciones de actividad">
       <${EstadoProcesoGlobal} />
       <${EstadoColaExcel} />
+      <${EstadoRecuperacion} />
     </div>
     <main class="contenedor">
       ${vista === "tabla" ? html`<${VistaTabla} />`

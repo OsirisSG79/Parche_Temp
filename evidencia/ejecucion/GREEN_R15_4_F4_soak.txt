@@ -1,0 +1,28 @@
+=== GREEN R15.4 F4 — soak test de análisis de video (MEDIUM/LOW-04) ===
+Fecha: 2026-10-16 02:58 UTC
+
+--- Diagnóstico de la anomalía de orden (test_v15_7_detector_apertura.py) ---
+Duración AISLADA vs EN ARCHIVO COMPLETO (sandbox Linux, este release):
+prueba                                              aislada   en archivo
+test_tablero_hinchado_no_adelanta_la_apertura        6.98s      6.12s
+test_discontinuidad_descarta_hinchado_sin_comp       4.27s      3.66s
+test_bolsa_de_pocos_pixeles_en_cuadro_grande        19.98s     20.02s
+test_solo_hinchado_no_es_apertura                    5.69s      4.48s
+test_config_antigua_no_crea_suelo_en_cuadro_8        6.48s      6.01s
+test_evento_pegado_al_baseline_pide_revision         6.40s      6.41s
+test_mide_maximo_tras_breakout_y_conserva_total      7.93s      7.43s
+test_modo_sin_medicion_de_maximo_puede_detenerse     1.56s      1.43s
+TOTAL archivo completo: 8 passed en 55.76s
+Conclusión: sin degradación dependiente del orden en el sandbox; el costo es
+inherente (generación + análisis de videos sintéticos por prueba). La anomalía
+del auditor (R15.2 y R15.3) queda monitorizada por el soak test siguiente.
+
+--- Soak test nuevo (100 análisis consecutivos + fds/RSS/caché) ---
+
+pruebas/test_v15_10_1_r154_soak_analisis_video.py::test_soak_100_analisis_sin_degradacion_ni_fugas PASSED [ 50%]
+pruebas/test_v15_10_1_r154_soak_analisis_video.py::test_videocapture_libera_descriptores PASSED [100%]
+
+============================= slowest 2 durations ==============================
+10.25s call     pruebas/test_v15_10_1_r154_soak_analisis_video.py::test_soak_100_analisis_sin_degradacion_ni_fugas
+0.12s setup    pruebas/test_v15_10_1_r154_soak_analisis_video.py::test_soak_100_analisis_sin_degradacion_ni_fugas
+============================== 2 passed in 10.44s ==============================

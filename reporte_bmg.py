@@ -1107,20 +1107,39 @@ def _crear_matriz_apertura_dinamica(libro, resultados: list[dict], mapa_filas: d
                "Intervalo ms", "Resolución ms", "Incertidumbre ms", "Fuente", "Estado tiempo",
                "Tiempo crudo ms", "Motivo rechazo", "Soporte cámaras", "Motivo / evidencia", "Ir al detalle",
                "Máximo inflado estimado ms", "Duración breakout→máximo ms",
-               "Soporte máximo", "Anomalías máximo"],
+               "Soporte máximo", "Anomalías máximo",
+               # R15.1 (MEDIO-09): columnas NUEVAS al final — el contrato de
+               # posiciones legacy (1-23) no se mueve.
+               "Estado máximo inflado", "Máximo visible NO CONFIRMADO ms"],
         "en": ["Project", "Stage", "Case key", "Test number", "Temperature", "Inflator",
                "V15.10 decision", "Confirmed opening ms", "Proposed time ms", "Interval ms",
                "Resolution ms", "Uncertainty ms", "Source", "Time status", "Raw time ms",
                "Rejection reason", "Camera support", "Reason / evidence", "Open detail",
                "Estimated maximum inflation ms", "Breakout→maximum duration ms",
-               "Maximum support", "Maximum anomalies"],
+               "Maximum support", "Maximum anomalies",
+               "Maximum inflation status", "Visible maximum NOT CONFIRMED ms"],
         "de": ["Projekt", "Stufe", "Case key", "Versuchsnummer", "Temperatur", "Generator",
                "V15.10-Entscheidung", "Bestätigte Öffnung ms", "Vorgeschlagene Zeit ms",
                "Intervall ms", "Auflösung ms", "Unsicherheit ms", "Quelle", "Zeitstatus",
                "Rohzeit ms", "Ablehnungsgrund", "Kameraunterstützung", "Grund / Evidenz", "Details öffnen",
                "Geschätzte maximale Entfaltung ms", "Dauer Breakout→Maximum ms",
-               "Maximum-Unterstützung", "Maximum-Anomalien"],
+               "Maximum-Unterstützung", "Maximum-Anomalien",
+               "Status maximale Entfaltung", "Sichtbares Maximum NICHT BESTÄTIGT ms"],
     }
+    # R15.1 (MEDIO-09): etiqueta de estado explícita del máximo agregado.
+    etiquetas_estado_max = {
+        "es": {"maximo_inflado_estimado": "Confirmado (estimado defendible)",
+               "maximo_visible_observado_no_confirmado": "NO CONFIRMADO (máximo visible observado)",
+               "sin_maximo_defendible": "Sin máximo defendible"},
+        "en": {"maximo_inflado_estimado": "Confirmed (defensible estimate)",
+               "maximo_visible_observado_no_confirmado": "NOT CONFIRMED (observed visible maximum)",
+               "sin_maximo_defendible": "No defensible maximum"},
+        "de": {"maximo_inflado_estimado": "Bestätigt (vertretbare Schätzung)",
+               "maximo_visible_observado_no_confirmado": "NICHT BESTÄTIGT (beobachtetes sichtbares Maximum)",
+               "sin_maximo_defendible": "Kein vertretbares Maximum"},
+    }.get(idioma, {"maximo_inflado_estimado": "Confirmado (estimado defendible)",
+                   "maximo_visible_observado_no_confirmado": "NO CONFIRMADO (máximo visible observado)",
+                   "sin_maximo_defendible": "Sin máximo defendible"})
     ws.append(encabezados.get(idioma, encabezados["es"][:]))
     for cell in ws[1]:
         cell.font = Font(bold=True, color="FFFFFF")
@@ -1197,6 +1216,8 @@ def _crear_matriz_apertura_dinamica(libro, resultados: list[dict], mapa_filas: d
             _numero(apertura.get("duracion_hasta_max_inflado_ms")),
             apertura.get("max_inflado_soporte") if apertura.get("max_inflado_soporte") is not None else "",
             "; ".join(str(x) for x in (apertura.get("max_inflado_anomalias") or [])),
+            etiquetas_estado_max.get(str(apertura.get("max_inflado_estado") or ""), ""),
+            _numero(apertura.get("tiempo_max_inflado_no_confirmado_ms")),
         ])
         if decision in {"VERIFICADO_HUMANO", "AUTO_VERIFICABLE"} and confirmado is not None:
             color, valor, _motivo = evaluar_apertura(confirmado, criterios)

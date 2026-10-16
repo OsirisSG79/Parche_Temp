@@ -1,0 +1,21 @@
+=== RED R15.6 F2 — corregir_lectura (ALTO-02) y editar_zona (ALTO-11) fuera del coordinador ===
+Fecha: 2026-10-16 17:55 UTC · HEAD: 218ea89 · árbol: sólo pruebas nuevas sin commitear
+
+    return backend.editar_zona(backend.SolicitudZona(
+dashboard/backend/app.py:7383: in editar_zona
+    gestor.actualizar_revision("carpeta", solicitud.prueba_id, estado="parcial")
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+a = ('carpeta', 'c769548df721f5ab'), kw = {'estado': 'parcial'}
+
+    def _reventar(*a, **kw):
+>       raise RuntimeError("almacén bloqueado (simulado)")
+E       RuntimeError: almacén bloqueado (simulado)
+
+pruebas/test_v15_10_1_r156_lectura_zona.py:39: RuntimeError
+=========================== short test summary info ============================
+FAILED pruebas/test_v15_10_1_r156_lectura_zona.py::test_corregir_lectura_doble_fallo_registra_inconsistencia_durable
+FAILED pruebas/test_v15_10_1_r156_lectura_zona.py::test_corregir_lectura_fallo_revision_cero_efectos
+FAILED pruebas/test_v15_10_1_r156_lectura_zona.py::test_corregir_lectura_ilegible_fallo_revision_cero_efectos
+FAILED pruebas/test_v15_10_1_r156_lectura_zona.py::test_editar_zona_fallo_revision_cero_efectos
+========================= 4 failed, 2 passed in 0.94s ==========================

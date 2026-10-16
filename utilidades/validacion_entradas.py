@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Iterable
 
 _RESERVADOS_WINDOWS = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
+# R15 (MEDIA-10): Windows también reserva las variantes con superíndices.
+_SUPERINDICES_WINDOWS = str.maketrans({"¹": "1", "²": "2", "³": "3"})
 _INVALIDOS_WINDOWS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 
@@ -18,7 +20,13 @@ def validar_nombre_excel(nombre: str | None) -> str | None:
     """Normaliza un nombre .xlsx y falla temprano ante nombres inválidos en Windows."""
     if nombre is None:
         return None
-    texto = str(nombre).strip()
+    crudo = str(nombre)
+    # R15 (MEDIA-10): el valor CRUDO se valida antes del trim: un espacio
+    # final es rechazo temprano, no una corrección silenciosa
+    # ('archivo ' antes se convertía en 'archivo.xlsx').
+    if crudo.endswith(" "):
+        raise ValueError("El nombre del Excel no puede terminar en espacio.")
+    texto = crudo.strip()
     if not texto:
         return None
     if Path(texto).name != texto or texto in {".", ".."}:
@@ -32,9 +40,14 @@ def validar_nombre_excel(nombre: str | None) -> str | None:
         texto = p.with_suffix(".xlsx").name
     elif not p.suffix:
         texto += ".xlsx"
-    base = Path(texto).stem.rstrip(" .").upper()
-    if base in _RESERVADOS_WINDOWS:
-        raise ValueError(f"«{Path(texto).stem}» es un nombre reservado por Windows; elige otro nombre para el Excel.")
+    # R15 (MEDIA-10): en Windows los nombres reservados siguen reservados
+    # aunque vayan seguidos de extensiones múltiples (CON.foo.xlsx, NUL.data.
+    # xlsx). Se comprueba el PRIMER componente antes del primer punto,
+    # incluidas las variantes con superíndices (COM¹/²/³, LPT¹/²/³).
+    primer_componente = texto.split(".", 1)[0].strip(" .").upper()
+    if (primer_componente in _RESERVADOS_WINDOWS
+            or primer_componente.translate(_SUPERINDICES_WINDOWS) in _RESERVADOS_WINDOWS):
+        raise ValueError(f"«{primer_componente}» es un nombre reservado por Windows; elige otro nombre para el Excel.")
     if len(texto) > 128:
         raise ValueError("El nombre del Excel es demasiado largo (máximo 128 caracteres).")
     return texto
@@ -59,8 +72,17 @@ def validar_bbox_normalizado(valores: Iterable[float], *, min_lado: float = 1e-4
 
 
 def es_raiz_codigo_seleccionada(ruta: str | Path, raiz_proyecto: str | Path) -> bool:
-    """Evita procesar por accidente la propia carpeta del programa como lote."""
+    """Evita procesar por accidente la carpeta del programa (o un padre) como lote.
+
+    R15 (MEDIA-11): además de la igualdad exacta, se bloquea cualquier
+    ANCESTRO de la raíz del programa: el lote se escanea recursivamente y un
+    padre (p. ej. «Programas Base») incluiría el árbol de V-Matrix completo.
+    """
     try:
-        return Path(ruta).resolve() == Path(raiz_proyecto).resolve()
+        objetivo = Path(ruta).resolve()
+        programa = Path(raiz_proyecto).resolve()
     except OSError:
         return False
+    if objetivo == programa:
+        return True
+    return programa.is_relative_to(objetivo)

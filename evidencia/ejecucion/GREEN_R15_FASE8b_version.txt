@@ -1,0 +1,10 @@
+== EVIDENCIA GREEN — R15 Fase 8b (bump de versión 15.10.1-r15) ==
+Fecha: 2026-10-15T15:57:38+00:00
+Suite completa: 860 passed / 0 failed / 0 skipped
+Node: 34/34 .cjs verdes
+
+app.py: FastAPI version + PATCH_BUILD = 15.10.1-r15
+index.html: 5 assets con ?v=15.10.1-r15 (estilos, i18n, visor_precision, red_segura, app)
+test_v15_10_1_r14_auditoria_preventiva: pins de versión actualizados con
+SUPERSEDE documentado (el pin sigue el release; contrato R14 conservado).
+INSTALAR_R15.ps1 ya verificaba 15.10.1-r15 (Fase 7b) — árbol ahora coherente.

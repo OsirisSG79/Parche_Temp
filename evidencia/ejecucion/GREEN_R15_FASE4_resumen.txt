@@ -1,0 +1,17 @@
+FASE 4 R15 — VERDE (ALTA-05 + MEDIA-16; pruebas obligatorias 11 y 12)
+Cambios en utilidades/estandar_apertura.py::analizar_secuencia_despliegue:
+  1. Mediana móvil CAUSAL (bruto[max(0,i-2):i+1]); R14 usaba bruto[i-1:i+2]
+     y con 2 muestras elegía el mayor ⇒ el frame 0 heredaba el área futura
+     ([1,100,100,100,100] → max=breakout, duración 0 ms, fases desordenadas).
+  2. Invariante: si idx_pico>0, el máximo no puede quedar en el frame de
+     breakout; se avanza al primer frame con área ≥ objetivo.
+  3. fases con orden no decreciente (expansion ≤ maximo_inflado).
+  4. Taxonomía MEDIA-16: maximo_inflado_estimado (meseta o caída confirmada)
+     / maximo_visible_observado_no_confirmado (clip termina creciendo o sin
+     estabilidad) / sin_maximo_defendible (ventana corta).
+RED (sin el fix, stash): 4 failed / 3 passed — RED_R15_FASE4_sobre_fase3.txt.
+GREEN: 7/7 nuevos + 8/8 regresión R13 sin editar.
+Suite completa: 820 passed / 13 failed / 1 skipped (13 = obsoletos V15.9
+conocidos; cero regresiones).
+...............                                                          [100%]
+15 passed in 0.65s

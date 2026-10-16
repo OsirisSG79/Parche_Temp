@@ -1,0 +1,13 @@
+=== SIM R15.6 B — instalación usada (checkpoint histórico) ===
+Fecha: 2026-10-16 19:38 UTC
+Base: como SIM A + siembra de estado usado (checkpoint 'completado' sin documento oficial en caché del árbol)
+
+payload copiado y verificado: 141 archivos
+Relocate-LegacyRootDocs: ['README_R14.md raíz retirado (idéntico a docs/informes)']
+siembra: .cache_ocr/estado_pipeline.json (completado, sim-b-r156) + validacion_resultados.json {resultados:[], revision:7}
+VERSION.txt=15.10.1-r15.6
+PATCH_BUILD en app.py: True
+cache-busting index (v=15.10.1-r15.6): 5
+pytest: 1034 passed, 16 skipped, 1 warning in 166.14s (0:02:46)
+node: 39/39
+contrato R15.4 MEDIUM-03 vigente: la suite completa pasa con la instalación usada sembrada
