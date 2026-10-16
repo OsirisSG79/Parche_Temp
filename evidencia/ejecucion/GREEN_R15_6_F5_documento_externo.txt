@@ -1,0 +1,8 @@
+=== GREEN R15.6 F5 — autoridad del documento externo (ALTO-04) ===
+Fecha: 2026-10-16 18:55 UTC · HEAD: a50512f
+
+--- Batería F5 (7) + arnés restaurar (3) ---
+10 passed in 3.00s
+
+--- Suite completa en HEAD exacto ---
+1050 passed, 1 warning in 159.83s (0:02:39)

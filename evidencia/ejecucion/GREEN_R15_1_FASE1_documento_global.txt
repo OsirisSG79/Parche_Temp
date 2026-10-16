@@ -1,0 +1,43 @@
+=== R15.1 FASE 1 — EVIDENCIA GREEN (CRÍTICO-01 + ALTO-02) ===
+Fecha: 2026-10-15T17:04:04+00:00
+Árbol: 6c2f85c + cambios Fase 1 sin commitear (se commitean a continuación)
+
+--- Guard estático: escritores directos de RUTA_VALIDACION en app.py (debe ser 0; sólo _commit_documento escribe) ---
+$ grep -c '_guardar_json_atomico(RUTA_VALIDACION' dashboard/backend/app.py
+0
+$ grep -n 'escribir_json_seguro(RUTA_VALIDACION' dashboard/backend/app.py
+911:                resultado = escribir_json_seguro(RUTA_VALIDACION, datos,
+1035:    escribir_json_seguro(RUTA_VALIDACION, datos, lanzar=True, compacto=True)
+
+--- Pruebas nuevas R15.1 Fase 1 (verbose) ---
+$ PYTHONPATH=. python -m pytest pruebas/test_v15_10_1_r15_1_documento_global.py -v
+============================= test session starts ==============================
+platform linux -- Python 3.13.16, pytest-9.0.3, pluggy-1.6.0 -- /usr/local/bin/python
+cachedir: .pytest_cache
+rootdir: /home/user/r15-repo
+configfile: pytest.ini
+plugins: anyio-4.15.1, platformdirs-4.12.3
+collecting ... collected 9 items
+
+pruebas/test_v15_10_1_r15_1_documento_global.py::test_escritura_legacy_lenta_no_pierde_commit_de_video PASSED [ 11%]
+pruebas/test_v15_10_1_r15_1_documento_global.py::test_sin_datos_concurrente_no_pierde_commit_de_video PASSED [ 22%]
+pruebas/test_v15_10_1_r15_1_documento_global.py::test_consolidar_fusiona_documento_fresco_no_snapshot_viejo PASSED [ 33%]
+pruebas/test_v15_10_1_r15_1_documento_global.py::test_mutaciones_heterogeneas_concurrentes_sin_perdidas PASSED [ 44%]
+pruebas/test_v15_10_1_r15_1_documento_global.py::test_endpoint_r15_sin_expected_revision_con_documento_versionado_409 PASSED [ 55%]
+pruebas/test_v15_10_1_r15_1_documento_global.py::test_endpoint_r15_con_expected_revision_correcta_sigue_funcionando PASSED [ 66%]
+pruebas/test_v15_10_1_r15_1_documento_global.py::test_documento_sin_versionar_acepta_primera_mutacion_sin_cas PASSED [ 77%]
+pruebas/test_v15_10_1_r15_1_documento_global.py::test_endpoint_legacy_honra_expected_revision_cuando_se_envia PASSED [ 88%]
+pruebas/test_v15_10_1_r15_1_documento_global.py::test_primitiva_mutar_documento_existe_y_es_unica PASSED [100%]
+
+============================== 9 passed in 0.51s ===============================
+
+--- Suite completa ---
+$ PYTHONPATH=. python -m pytest pruebas/ -q
+.....                                                                    [100%]
+=============================== warnings summary ===============================
+../../../usr/local/lib/python3.13/site-packages/fastapi/testclient.py:1
+  /usr/local/lib/python3.13/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+869 passed, 1 warning in 97.60s (0:01:37)

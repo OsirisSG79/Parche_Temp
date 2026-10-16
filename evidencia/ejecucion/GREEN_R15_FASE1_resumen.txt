@@ -1,0 +1,25 @@
+FASE 1 R15 — VERDE (CRIT-01 + ALTA-02 + MEDIA-15 + guard reanálisis/reserva)
+Árbol: /home/user/r15-repo rama codex/ocr-v15-10-1-r15
+Cambios en dashboard/backend/app.py:
+  1. Reserva atómica global _pipeline_reserva + _slot_pipeline_ocupado_locked()
+     + _rollback_admision_pipeline() (restaura estado, libera reserva/hilo y
+     repersiste checkpoint).
+  2. iniciar_pipeline: admisión atómica bajo lock doble (pipeline→reanálisis,
+     mismo orden que /api/video/maximo y configurar_criterios_apertura);
+     409 si slot ocupado/reservado o reanálisis vivo; registrar_proyecto
+     trasladado TRAS la admisión con rollback (MEDIA-15); checkpoint con
+     rollback si falla la persistencia; hilo asignado bajo lock con reserva
+     activa y start() verificado con rollback+500 (CRIT-01).
+  3. reprocesar_caso: mismo patrón (ALTA-02); guardar_roi_preferida trasladado
+     TRAS la admisión con rollback+503; ejecucion_id reproceso-<uuid12>.
+  4. reanalizar_videos: el guard bajo _pipeline_lock ahora también rechaza si
+     hay reserva o hilo creado-no-arrancado.
+  Mensajes 409 V14 conservados para el caso hilo-vivo (test_v14_sop_recuperacion
+  sin editar).
+Movido README_R14.md → docs/informes/README_R14.md (artefacto de reconstrucción).
+
+Suite completa: 803 passed / 13 failed / 1 skipped (817 colectados; baseline
+807 + 10 nuevos). Los 13 fallos son EXACTAMENTE los tests V15.9 obsoletos ya
+clasificados en la Fase 0 (contratos reemplazados por doctrina R9–R13); cero
+regresiones nuevas. Antes del fix: 9 failed / 1 passed (RED_R15_FASE1_sobre_R14.txt).
+Concurrencia: 10/10 verdes (GREEN_R15_FASE1_concurrencia.txt).

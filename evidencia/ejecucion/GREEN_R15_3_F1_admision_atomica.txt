@@ -1,0 +1,16 @@
+=== GREEN R15.3 F1 — admisión atómica + rollback Thread.start (CRÍTICO-01 + MEDIO-05) ===
+Nota: evidencia generada en el árbol final R15.3 (0b00b07) reproduciendo la corrida GREEN del commit 005beb6.
+Fecha: 2026-10-15 22:38 UTC
+
+plugins: anyio-4.15.1, platformdirs-4.12.3
+collecting ... collected 3 items
+
+pruebas/test_v15_10_1_r153_admision_atomica.py::test_ventana_forzada_doble_admision_reanalisis_pipeline PASSED [ 33%]
+pruebas/test_v15_10_1_r153_admision_atomica.py::test_carrera_admision_100_iteraciones_un_solo_ganador PASSED [ 66%]
+pruebas/test_v15_10_1_r153_admision_atomica.py::test_fallo_thread_start_reanalisis_estado_seguro PASSED [100%]
+
+============================== 3 passed in 0.77s ===============================
+
+--- Regresión concurrencia R15 + documento único R15.2 ---
+..........................                                               [100%]
+26 passed in 2.61s

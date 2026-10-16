@@ -1,0 +1,45 @@
+=== R15.2 F7 — EVIDENCIA DE EMPAQUETADO Y SIMULACIONES DE INSTALACIÓN ===
+Fecha: 2026-10-15T21:13:37+00:00
+Árbol de desarrollo: r15-repo @ 3d7a4ef (docs F7; identidad 15.10.1-r15.2)
+Nota: el SHA-256 del ZIP FINAL se reporta en el mensaje de entrega (este log
+viaja DENTRO del ZIP; precedente R15.1 idéntico).
+
+--- Contenido del paquete ---
+payload (MANIFEST_SHA256_R15_2.txt): 107 archivos = manifiesto R15.1 (93)
+  + utilidades/persistencia_documento.py + pipeline.py (CRÍTICO-02)
+  + 4 pruebas r152 nuevas + 5 pruebas volteadas por contrato (SUPERSEDE)
+  + docs/informes/{CHANGELOG,INFORME,MATRIZ}_R15_2.md
+raíz ZIP: CHANGELOG_R15_2.md, INSTALAR_R15_2.ps1/.bat, V-MATRIX_R15_2.patch
+  (git diff 69b1900..HEAD, 9396 líneas), MANIFEST_SHA256_R15_2.txt,
+  SHA256SUMS.txt, verificar_sha256.sh, VERIFICAR_SHA256.ps1
+evidencia/: INFORME+MATRIZ (copias) + ejecucion/ (logs RED/GREEN R15, R15.1, R15.2)
+skills/: 6 SKILL.md (.agents/skills/v-matrix-*)
+
+--- Verificación interna del ZIP (extraído, antes de sims) ---
+$ grep -v sums/verificadores SHA256SUMS.txt | sha256sum -c -
+0 FAILED (todas las entradas OK)
+$ manifiesto: 107 entradas, 0 archivos faltantes en el árbol extraído
+
+--- Simulación A: instalación LIMPIA (criterio 9/10) ---
+Base: git clone r15-repo @ 69b1900 (V15.9.10 + overlay R14) sin .git
++ verificación hash a hash del manifiesto contra el ZIP (0 desvíos)
++ copia del payload + réplica de Relocate-LegacyRootDocs + chmod 755 *.command
+pytest: 919 passed, 16 skipped, 0 failed
+  (16 skips = 15 pruebas de instalador sin INSTALAR_R15_2.ps1 en el árbol
+   payload — mismo criterio que R15.1 — + 1 de plataforma)
+node: 37/37 .cjs OK
+
+--- Simulación B: instalación USADA ---
+Ídem A + sembrado de estado de uso real:
+  .cache_ocr/estado_pipeline.json = {"estado":"completado","ejecucion_id":"usada-20261014","progreso_pct":100.0,"reanudable":false}
+  validacion_resultados.json raíz = documento versionado revision_documento=7
+pytest: 919 passed, 16 skipped, 0 failed
+node: 37/37 .cjs OK
+→ ninguna prueba depende del estado previo de la instalación (BAJO-11 R15.1
+  sigue cerrado) y el documento sembrado con revisión no rompe nada.
+
+--- Coherencia de cifras ---
+dev: 935 passed / 0 failed · sims: 919 passed + 16 skipped = 935 (sin pérdidas)
+
+PENDIENTE DE CAMPO (criterio 11): INSTALAR_R15_2 en Windows real (fallo CIM
+inducido, -Force, rollback). Sin pwsh en sandbox; pruebas estáticas 22/22.

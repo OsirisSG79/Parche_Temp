@@ -1,0 +1,16 @@
+=== GREEN R15.4 F5 — instalador + identidad 15.10.1-r15.4 ===
+Fecha: 2026-10-16 03:06 UTC
+
+--- Batería instalador/identidad/auditoría preventiva ---
+22 passed in 0.20s
+
+--- Suite completa ---
+990 passed, 0 failed (148.34s)
+node: 38/38
+
+--- ps1 ASCII puro / sin BOM ---
+bytes>127: 0 · BOM: False
+
+--- bases/markers acumulativos ---
+149:  $basesVersion = @('15.10.1-r14','15.10.1-r15','15.10.1-r15.1','15.10.1-r15.2','15.10.1-r15.3','15.10.1-r15.4')
+150:  $markersBase = @('PATCH_INSTALLED_V15_10_1_R14.json','PATCH_INSTALLED_V15_10_1_R15.json','PATCH_INSTALLED_V15_10_1_R15_1.json','PATCH_INSTALLED_V15_10_1_R15_2.json','PATCH_INSTALLED_V15_10_1_R15_3.json','PATCH_INSTALLED_V15_10_1_R15_4.json')

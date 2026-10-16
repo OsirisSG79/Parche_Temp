@@ -1,0 +1,29 @@
+=== GREEN R15.4 F6 — empaquetado, simulaciones y verificación final ===
+Fecha: 2026-10-16 03:39 UTC · HEAD: cc566e8
+
+--- Suite dev (árbol completo exacto, HEAD cc566e8) ---
+990 passed, 0 failed (146.72s)
+node: 38/38 (pruebas/*.cjs activos)
+
+--- Simulaciones de instalación (árboles fresh sin .git, payload del manifiesto + Relocate-LegacyRootDocs) ---
+SIM A_instalacion_limpia:
+  Base 69b1900 (V15.9.10+R14, fresh, sin .git) + payload R15.4 (123 archivos) + Relocate-LegacyRootDocs (1): README_R14.md (retirado: copia idéntica en docs/informes)
+  Identidad OK: VERSION.txt/app.py/index.html = 15.10.1-r15.4
+  pytest (153s): 974 passed, 16 skipped, 1 warning in 151.32s (0:02:31)
+  node: 38/38
+SIM B_instalacion_usada:
+  Base 69b1900 USADA (checkpoint completado + doc rev 7) + payload R15.4 (123) + Relocate (1)
+  Datos del usuario intactos tras la instalación (checkpoint y documento byte a byte)
+  Identidad OK: VERSION.txt/app.py/index.html = 15.10.1-r15.4
+  pytest (151s): 974 passed, 16 skipped, 1 warning in 150.12s (0:02:30)
+  node: 38/38
+SIM C_upgrade_desde_r15_3:
+  Base 69b1900 + payload R15.3 (114) + Relocate (1) → instalación r15.3 verificada
+  Identidad OK: VERSION.txt/app.py/index.html = 15.10.1-r15.4
+  pytest (150s): 974 passed, 16 skipped, 1 warning in 148.79s (0:02:28)
+  node: 38/38
+
+--- Composición del paquete ---
+payload (MANIFEST_SHA256_R15_4.txt): 123 archivos = 114 (R15.3) + aprendizaje.py + 5 pruebas R15.4 + 3 docs R15.4
+patch acumulativo 69b1900..HEAD: 12842 líneas
+evidencia/ejecucion: 56 logs (R15→R15.4, incluye SIM A/B/C)

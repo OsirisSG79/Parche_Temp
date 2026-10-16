@@ -25,6 +25,7 @@ Ejecución:
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import importlib.util
 import json
@@ -65,6 +66,7 @@ from utilidades.matriz_apertura import (  # noqa: E402
     validar_limites,
 )
 from utilidades.persistencia import escribir_json_seguro  # noqa: E402
+from utilidades import persistencia_documento as _pdoc  # noqa: E402  (R15.2)
 from utilidades.validacion_entradas import (  # noqa: E402
     es_raiz_codigo_seleccionada, validar_bbox_normalizado, validar_nombre_excel,
 )
@@ -87,8 +89,8 @@ _CHECKPOINT_DEBOUNCE = max(0.05, float(_PERSISTENCIA_CFG.get("checkpoint_debounc
 _EXCEL_DEBOUNCE = max(0.10, float(_PERSISTENCIA_CFG.get("excel_debounce_segundos", 0.80)))
 _EXCEL_LATENCIA_MAX = max(_EXCEL_DEBOUNCE, float(_PERSISTENCIA_CFG.get("excel_latencia_max_segundos", 2.50)))
 
-app = FastAPI(title="OCR Versuchsmatrix", version="15.10.1-r14")
-PATCH_BUILD = "15.10.1-r14"
+app = FastAPI(title="OCR Versuchsmatrix", version="15.10.1-r15.6")
+PATCH_BUILD = "15.10.1-r15.6"
 
 
 # Cache acotada de lecturas 0/90/180/270 de cajas exactas. Evita repetir
@@ -168,6 +170,8 @@ class SolicitudRevisionVideo(BaseModel):
     # Se separa de la ROI general para no hacer frágil el detector ante pequeños
     # movimientos de cámara.
     bbox_evento_norm: list[float] | None = Field(default=None, min_length=4, max_length=4)
+    # R15 (MEDIA-14): CAS de documento; None = el cliente no versiona todavía.
+    expected_revision: int | None = Field(default=None, ge=0)
 
 
 class SolicitudZonaVideo(BaseModel):
@@ -177,6 +181,7 @@ class SolicitudZonaVideo(BaseModel):
     frame_index: int | None = Field(default=None, ge=0)
     tipo_camara: str | None = Field(default=None, max_length=64)
     usuario: str = Field(default="dashboard", min_length=1, max_length=128)
+    expected_revision: int | None = Field(default=None, ge=0)  # R15 (MEDIA-14)
 
 
 class SolicitudZonaRevertir(BaseModel):
@@ -185,6 +190,7 @@ class SolicitudZonaRevertir(BaseModel):
     video_id: str = Field(min_length=1, max_length=128)
     indice: int = Field(default=0, ge=0, le=7)
     usuario: str = Field(default="dashboard", min_length=1, max_length=128)
+    expected_revision: int | None = Field(default=None, ge=0)  # R15 (MEDIA-14)
 
 
 class SolicitudMaximoVideo(BaseModel):
@@ -192,6 +198,7 @@ class SolicitudMaximoVideo(BaseModel):
     video_id: str = Field(min_length=1, max_length=128)
     frame_index: int = Field(ge=0, strict=True)
     usuario: str = Field(default="dashboard", min_length=1, max_length=128)
+    expected_revision: int | None = Field(default=None, ge=0)  # R15 (MEDIA-14)
 
 
 class SolicitudCriteriosApertura(BaseModel):
@@ -252,6 +259,7 @@ class SolicitudCampoManual(BaseModel):
     valor: str = Field(min_length=1, max_length=8192)
     usuario: str = Field(default="dashboard", min_length=1, max_length=128)
     componente: str | None = Field(default=None, pattern="^(bolsa_aire|tablero|otro|por_identificar)$")
+    expected_revision: int | None = Field(default=None, ge=0)  # R15.1 (ALTO-02): CAS opcional en writers del documento.
 
 
 class SolicitudExportacion(BaseModel):
@@ -261,6 +269,7 @@ class SolicitudExportacion(BaseModel):
 class SolicitudConsolidacion(BaseModel):
     archivos: list[str] = Field(min_length=1, max_length=20)
     regenerar_excel: bool = True
+    expected_revision: int | None = Field(default=None, ge=0)  # R15.1 (ALTO-02): CAS opcional en writers del documento.
 
 
 class SolicitudCorreccion(BaseModel):
@@ -277,6 +286,7 @@ class SolicitudCorreccion(BaseModel):
     accion: str = Field(default="guardar_sin_entrenar", pattern=(
         "^(aceptar|corregir|ilegible|no_es_campo|guardar_sin_entrenar|confirmar_entrenar)$"))
     usuario: str = Field(default="dashboard", min_length=1, max_length=128)
+    expected_revision: int | None = Field(default=None, ge=0)  # R15.1 (ALTO-02)
 
 
 class SolicitudAnotacionRegion(BaseModel):
@@ -336,15 +346,16 @@ def _resolver_region_orientacion(prueba_id, imagen_id, marco):
 
 @app.post("/api/aprendizaje/orientacion-region")
 def guardar_orientacion_region(solicitud: SolicitudOrientacionRegional):
+    # R15.6 (ALTO-09): no cambiar preferencias mientras el pipeline utiliza
+    # el modelo — guard uniforme (hilo + reserva + estado), antes de cualquier
+    # lookup o efecto.
+    _assert_pipeline_inactivo("cambiar la orientación regional")
     fila, item, region, ruta = _resolver_region_orientacion(
         solicitud.prueba_id, solicitud.imagen_id, solicitud.marco)
     gestor = GestorAprendizaje(CONFIG)
     if gestor.estado_revision("carpeta", solicitud.prueba_id,
             _fila_publica(fila)["revision"]["estado"])["estado"] == "completada":
         raise HTTPException(409, "Reabre la revisión antes de editar.")
-    # No cambiar preferencias mientras el pipeline está utilizando el modelo.
-    if _pipeline_hilo and _pipeline_hilo.is_alive():
-        raise HTTPException(409, "Detén conservando el avance antes de cambiar la orientación regional.")
     try:
         resultado = gestor.guardar_orientacion_regional(ruta, solicitud.marco, solicitud.grados)
     except ValueError as exc:
@@ -407,10 +418,20 @@ def marcar_region_no_texto(solicitud: SolicitudNoTexto):
     unidad = next((u for u in unidades if _bbox_igual(u.get("bbox"), solicitud.bbox)), None)
     if unidad is None:
         raise HTTPException(400, "Selecciona una detección existente o un descarte activo.")
-    resultado = gestor.marcar_no_texto(ruta, solicitud.bbox,
-        str(unidad.get("texto_ocr") or unidad.get("texto") or ""),
-        solicitud.usuario, activo=not solicitud.restaurar)
-    gestor.actualizar_revision("carpeta", solicitud.prueba_id, estado="parcial")
+
+    # R15.6 (MEDIO-06): marca + estado de revisión en una sola transacción.
+    def _efectos():
+        efecto = gestor.marcar_no_texto(
+            ruta, solicitud.bbox,
+            str(unidad.get("texto_ocr") or unidad.get("texto") or ""),
+            solicitud.usuario, activo=not solicitud.restaurar)
+        gestor.actualizar_revision("carpeta", solicitud.prueba_id,
+                                   estado="parcial")
+        return efecto
+
+    resultado = _transaccion_efecto_humano(
+        "marca de región sin texto", gestor, "carpeta", solicitud.prueba_id,
+        _efectos, recurso=str(ruta), ruta_imagen=ruta)
     _regenerar_excel(resultado)
     return resultado
 
@@ -451,15 +472,28 @@ def marcar_regiones_no_texto_lote(solicitud: SolicitudNoTextoLote):
         unicas.append(list(limpia))
     if not unicas:
         raise HTTPException(400, "No hay regiones válidas para procesar.")
-    resultados = []
+    pares = []
     for bbox in unicas:
         unidad = next((u for u in fuente_unidades if _bbox_igual(u.get("bbox"), bbox)), None)
         if unidad is None:
             raise HTTPException(400, f"La región {bbox} ya no coincide con una detección disponible.")
-        resultados.append(gestor.marcar_no_texto(
-            ruta, bbox, str(unidad.get("texto_ocr") or unidad.get("texto") or ""),
-            solicitud.usuario, activo=not solicitud.restaurar))
-    gestor.actualizar_revision("carpeta", solicitud.prueba_id, estado="parcial")
+        pares.append((bbox, str(unidad.get("texto_ocr") or unidad.get("texto") or "")))
+
+    # R15.6 (MEDIO-06): lote ATÓMICO — todas las marcas + la revisión se
+    # aplican dentro de una sola transacción compensable; si cualquier marca
+    # falla, el snapshot común restaura también las ya aplicadas.
+    def _efectos():
+        resultados = [gestor.marcar_no_texto(
+                          ruta, bbox, texto, solicitud.usuario,
+                          activo=not solicitud.restaurar)
+                      for bbox, texto in pares]
+        gestor.actualizar_revision("carpeta", solicitud.prueba_id,
+                                   estado="parcial")
+        return resultados
+
+    resultados = _transaccion_efecto_humano(
+        "marca por lote de regiones sin texto", gestor, "carpeta",
+        solicitud.prueba_id, _efectos, recurso=str(ruta), ruta_imagen=ruta)
     respuesta = {"actualizadas": len(resultados), "restauradas": bool(solicitud.restaurar),
                  "mensaje": (f"{len(resultados)} regiones restauradas." if solicitud.restaurar
                              else f"{len(resultados)} textos descartados; puedes restaurarlos después.")}
@@ -491,6 +525,7 @@ class SolicitudRotacion(BaseModel):
     imagen_id: str | None = Field(default=None, max_length=128)
     grados: float = Field(ge=-360, le=360)
     usar_automatico: bool = False
+    expected_revision: int | None = Field(default=None, ge=0)  # R15.1 (ALTO-02): CAS opcional en writers del documento.
 
 
 class SolicitudPlantilla(BaseModel):
@@ -509,12 +544,14 @@ class SolicitudImagenSinDatos(BaseModel):
     prueba_id: str = Field(min_length=1, max_length=128)
     imagen_id: str | None = Field(default=None, max_length=128)
     motivo: str | None = Field(default=None, max_length=512)
+    expected_revision: int | None = Field(default=None, ge=0)  # R15.1 (ALTO-02): CAS opcional en writers del documento.
     usuario: str = Field(default="dashboard", min_length=1, max_length=128)
 
 
 class SolicitudImagenVerificada(BaseModel):
     prueba_id: str = Field(min_length=1, max_length=128)
     imagen_id: str = Field(min_length=1, max_length=128)
+    expected_revision: int | None = Field(default=None, ge=0)  # R15.1 (ALTO-02): CAS opcional en writers del documento.
     usuario: str = Field(default="dashboard", min_length=1, max_length=128)
 
 
@@ -542,6 +579,47 @@ _pipeline_continuar.set()
 _pipeline_cancelar = threading.Event()
 _pipeline_detener_fin_id = threading.Event()
 _pipeline_hilo: threading.Thread | None = None
+# R15 (auditoría R14, CRIT-01/ALTA-02): reserva del ÚNICO slot de worker.
+# En R14 existía una ventana de carrera entre comprobar ``is_alive()`` dentro
+# del lock y asignar/arrancar el hilo después de persistir el checkpoint: dos
+# solicitudes simultáneas podían ser admitidas y arrancar dos pipelines. La
+# reserva se adquiere de forma ATÓMICA en el mismo lock que cambia el estado
+# y se libera cuando el hilo arranca (o mediante rollback si algo falla).
+_pipeline_reserva: dict | None = None
+
+
+def _slot_pipeline_ocupado_locked() -> bool:
+    """True si el slot del worker está ocupado o reservado.
+
+    Debe llamarse con ``_pipeline_lock`` adquirido. ``is_alive()`` solo no
+    basta: un hilo creado pero todavía no arrancado devuelve False.
+    """
+    if _pipeline_reserva is not None:
+        return True
+    return bool(_pipeline_hilo is not None and _pipeline_hilo.is_alive())
+
+
+def _rollback_admision_pipeline(estado_anterior: dict,
+                                hilo_fallido: "threading.Thread | None" = None,
+                                ) -> None:
+    """R15: deshace la admisión (estado, reserva, hilo) si el arranque falla.
+
+    El slot es exclusivo: entre la admisión y el rollback ninguna otra
+    solicitud pudo tomarlo (todas reciben 409 mientras la reserva existe), de
+    modo que restaurar la instantánea previa es seguro. Vuelve a persistir el
+    checkpoint para no dejar un «procesando fantasma» (prueba obligatoria 4).
+    """
+    global _pipeline_hilo, _pipeline_reserva
+    with _pipeline_lock:
+        _pipeline_estado.clear()
+        _pipeline_estado.update(estado_anterior)
+        _pipeline_reserva = None
+        if hilo_fallido is not None and _pipeline_hilo is hilo_fallido:
+            _pipeline_hilo = None
+    try:
+        _persistir_checkpoint_pipeline()
+    except Exception:  # noqa: BLE001 — el rollback no enmascara el error original
+        pass
 _pipeline_excel_lock = threading.Lock()
 _externas_lock = threading.Lock()
 _entrenamiento_lock = threading.Lock()
@@ -780,6 +858,58 @@ def _degradar_campos_consenso_legacy(fila: dict) -> None:
         dato["motivos_revision"] = motivos
 
 
+def _migrar_fila_consensos(fila, algoritmo_version: str, consenso_videos,
+                           consenso_valido) -> bool:
+    """R15.2 (CRÍTICO-01): migración de UNA fila; idempotente y sin persistir.
+
+    Devuelve True si la fila cambió. El llamador decide sobre qué documento
+    aplicarla: la vista en memoria (degradación fail-closed para mostrar) o
+    el documento fresco bajo lock (única base válida para persistir).
+    """
+    if not isinstance(fila, dict):
+        return False
+    anterior = fila.get("video_apertura")
+    if not isinstance(anterior, dict) or not anterior:
+        return False
+    if anterior.get("algoritmo_consenso") == algoritmo_version:
+        return False
+    videos = fila.get("videos") or []
+    if not videos:
+        # V15.9.3 (CRIT-01): sin videos originales que recalcular, el
+        # consenso legado se juzga con la regla vigente. Si NO la supera
+        # (p.ej. metadatos incompletos sin ``total_principales``, o
+        # soporte 2 con total 4), no se publica: la evidencia original se
+        # conserva en ``video_apertura_anterior``, la fila queda marcada
+        # para revisión y el tiempo que ese consenso hubiera publicado se
+        # degrada a ``pendiente_revision`` conservando la medida. Si la
+        # supera, sólo se sella la versión del algoritmo para no
+        # re-juzgarlo en cada carga (sin elevar ni cambiar su estado).
+        if consenso_valido(anterior):
+            fila["video_apertura"] = {**anterior,
+                                      "algoritmo_consenso": algoritmo_version}
+            return True
+        fila["video_apertura_anterior"] = anterior
+        motivos = [str(x) for x in (anterior.get("motivo_revision") or [])]
+        motivos.append(
+            "V15.9.3 (CRIT-01): consenso legado con metadatos incompletos o "
+            "regla obsoleta; sin videos originales para recalcular, se "
+            "conserva como evidencia pendiente de revisión humana.")
+        fila["video_apertura"] = {**anterior,
+                                  "algoritmo_consenso": algoritmo_version,
+                                  "requiere_revision": True,
+                                  "motivo_revision": motivos}
+        _degradar_campos_consenso_legacy(fila)
+        return True
+    try:
+        fila["video_apertura_anterior"] = anterior
+        consenso = consenso_videos(videos, CONFIG)
+        _aplicar_consenso_video_a_fila(fila, consenso)
+        return True
+    except Exception:
+        fila.pop("video_apertura_anterior", None)
+        return False
+
+
 def _migrar_consensos_video(datos: dict) -> int:
     """V15.9.2 (C1): reevalúa consensos persistidos con reglas anteriores.
 
@@ -790,58 +920,22 @@ def _migrar_consensos_video(datos: dict) -> int:
     vigente (soporte 3-de-4, causas graves B2, alertas sin clasificar C2).
     Las confirmaciones manuales reales se preservan porque viven en los items
     de video y el recálculo las respeta. La migración se persiste una sola
-    vez; si algo falla, no se aborta la carga (la vista usa datos en memoria).
+    vez vía la primitiva compartida, re-aplicando el patch por fila sobre el
+    documento FRESCO bajo lock (R15.2); si algo falla, no se aborta la carga
+    (la vista usa datos en memoria).
     """
     try:
-        from video_airbag import CONSENSO_ALGORITMO_VERSION, consenso_videos
+        from video_airbag import (CONSENSO_ALGORITMO_VERSION, consenso_videos,
+                                  consenso_valido)
     except Exception:
         return 0
-    migradas = 0
-    for fila in datos.get("resultados", []) or []:
-        if not isinstance(fila, dict):
-            continue
-        anterior = fila.get("video_apertura")
-        if not isinstance(anterior, dict) or not anterior:
-            continue
-        if anterior.get("algoritmo_consenso") == CONSENSO_ALGORITMO_VERSION:
-            continue
-        videos = fila.get("videos") or []
-        if not videos:
-            # V15.9.3 (CRIT-01): sin videos originales que recalcular, el
-            # consenso legado se juzga con la regla vigente. Si NO la supera
-            # (p.ej. metadatos incompletos sin ``total_principales``, o
-            # soporte 2 con total 4), no se publica: la evidencia original se
-            # conserva en ``video_apertura_anterior``, la fila queda marcada
-            # para revisión y el tiempo que ese consenso hubiera publicado se
-            # degrada a ``pendiente_revision`` conservando la medida. Si la
-            # supera, sólo se sella la versión del algoritmo para no
-            # re-juzgarlo en cada carga (sin elevar ni cambiar su estado).
-            from video_airbag import consenso_valido
-            if consenso_valido(anterior):
-                fila["video_apertura"] = {**anterior,
-                                          "algoritmo_consenso": CONSENSO_ALGORITMO_VERSION}
-                migradas += 1
-                continue
-            fila["video_apertura_anterior"] = anterior
-            motivos = [str(x) for x in (anterior.get("motivo_revision") or [])]
-            motivos.append(
-                "V15.9.3 (CRIT-01): consenso legado con metadatos incompletos o "
-                "regla obsoleta; sin videos originales para recalcular, se "
-                "conserva como evidencia pendiente de revisión humana.")
-            fila["video_apertura"] = {**anterior,
-                                      "algoritmo_consenso": CONSENSO_ALGORITMO_VERSION,
-                                      "requiere_revision": True,
-                                      "motivo_revision": motivos}
-            _degradar_campos_consenso_legacy(fila)
-            migradas += 1
-            continue
-        try:
-            fila["video_apertura_anterior"] = anterior
-            consenso = consenso_videos(videos, CONFIG)
-            _aplicar_consenso_video_a_fila(fila, consenso)
-            migradas += 1
-        except Exception:
-            fila.pop("video_apertura_anterior", None)
+
+    def _migrar_fila(fila):
+        return _migrar_fila_consensos(fila, CONSENSO_ALGORITMO_VERSION,
+                                      consenso_videos, consenso_valido)
+
+    migradas = sum(1 for fila in (datos.get("resultados", []) or [])
+                   if _migrar_fila(fila))
     if migradas:
         # V15.9.4 (ALTA-N5): la migración sólo se declara si quedó PERSISTIDA.
         # Con escritura fallida (guardado=False o excepción) no se cuenta como
@@ -849,14 +943,28 @@ def _migrar_consensos_video(datos: dict) -> int:
         # expone el fallo en /api/estado y los datos anteriores del disco se
         # conservan intactos. La vista en memoria conserva la degradación
         # fail-closed (evidencia en ``video_apertura_anterior`` preservada).
+        #
+        # R15.2 (CRÍTICO-01): la persistencia NO escribe el snapshot leído
+        # antes de migrar — eso perdería commits concurrentes (carreras con
+        # ediciones UI/pipeline). Se delega en la primitiva compartida, que
+        # bajo el lock ÚNICO lee el documento FRESCO y re-aplica el patch por
+        # fila (idempotente); si el documento fresco ya quedó migrado por una
+        # ejecución concurrente, no se commitea (SIN_CAMBIOS).
         global _advertencia_migracion_consensos
         detalle_error = None
         try:
-            resultado = escribir_json_seguro(RUTA_VALIDACION, datos,
-                                             lanzar=False, compacto=True)
-            if not resultado:
-                detalle_error = str(getattr(resultado, "error", None)
-                                    or "escritura no verificada")
+            def _persistir_migracion(frescos):
+                aplicadas = sum(1 for fila in (frescos.get("resultados", []) or [])
+                                if _migrar_fila(fila))
+                return aplicadas if aplicadas else _pdoc.SIN_CAMBIOS
+
+            # Se llama a la primitiva compartida DIRECTA (no al envoltorio
+            # HTTP): la migración corre DENTRO de ``_cargar_datos`` y el
+            # post_commit de invalidación de caché descartaría la vista que
+            # se está cargando. El mtime cacheado queda anterior a esta
+            # escritura: la próxima carga detecta el cambio y releé.
+            _revision, _aplicadas = _pdoc.mutar_documento(
+                RUTA_VALIDACION, _persistir_migracion)
         except Exception as exc:  # noqa: BLE001 — se comunica, no se aborta la carga
             detalle_error = f"{type(exc).__name__}: {exc}"
         if detalle_error:
@@ -898,6 +1006,807 @@ def _cargar_datos() -> dict | None:
         # V15.9.2 (C1): migración única de consensos con regla obsoleta.
         _migrar_consensos_video(cargados)
     return _cache["datos"]
+
+
+# R15 (ALTA-03 + ALTA-07 + MEDIA-14) + R15.2 (CRÍTICO-01/CRÍTICO-02): la
+# política central de mutación de validacion_resultados.json vive en
+# ``utilidades.persistencia_documento``, la ÚNICA autoridad de escritura
+# compartida por backend, pipeline y validación. Contrato: lock por ruta →
+# leer fresco → validar revisión (CAS) → aplicar patch → incrementar
+# ``revision_documento`` → escritura atómica verificada. Los commits de fondo
+# (reanálisis) aplican un merge por video sobre el documento MÁS RECIENTE en
+# disco en lugar de reescribir un snapshot completo: una edición humana hecha
+# durante el reanálisis sobrevive. Los endpoints mutantes aceptan
+# ``expected_revision`` (compare-and-swap): si otra pestaña ya cambió el
+# documento, se responde 409 «recarga antes de guardar».
+
+
+def _lock_documento() -> "threading.RLock":
+    """Lock de la autoridad única para el documento activo (compartido)."""
+    return _pdoc.lock_documento(RUTA_VALIDACION)
+
+
+def _invalidar_cache_documento(_revision: int, _datos: dict) -> None:
+    _cache.update({"mtime": None, "datos": None})
+
+
+# R15.4 (HIGH-01): mensaje único para fallo de escritura del documento.
+_MSG_GUARDADO_FALLO = (
+    "No se pudo guardar el documento de resultados (disco, permisos o "
+    "archivo bloqueado). El cambio NO se aplicó. Revisa espacio/permisos y "
+    "vuelve a intentarlo.")
+
+
+# R15.4 (MEDIUM-02): reserva de operación por recurso. Las etapas pesadas
+# (análisis de video) corren FUERA del lock del documento; la reserva
+# garantiza que una segunda operación incompatible sobre el mismo recurso
+# reciba 423 inmediato con mensaje visible, en vez de esperar el lock en
+# silencio. El lock documental sólo se toma en entradas/salidas cortas.
+_operaciones_lock = threading.Lock()
+_operaciones_activas: dict = {}
+
+
+def _reservar_operacion(recurso: str, accion: str) -> None:
+    # R15.5 (P0): un recurso con inconsistencia sin resolver no admite
+    # operaciones nuevas hasta la resolución manual documentada.
+    _assert_recurso_consistente(recurso, accion)
+    with _operaciones_lock:
+        activa = _operaciones_activas.get(recurso)
+        if activa is not None:
+            raise HTTPException(423, (
+                f"Otra operación sobre este video está en curso "
+                f"({activa['accion']}, iniciada {activa['inicio']}). "
+                "Espera a que termine e inténtalo de nuevo."))
+        _operaciones_activas[recurso] = {
+            "accion": accion,
+            "inicio": datetime.now().isoformat(timespec="seconds")}
+
+
+def _liberar_operacion(recurso: str) -> None:
+    with _operaciones_lock:
+        _operaciones_activas.pop(recurso, None)
+
+
+# R15.4 (MEDIUM-03): estados del pipeline en los que los parciales del
+# checkpoint forman parte legítimamente de la vista ACTUAL (corrida viva,
+# pausa, detención recuperable o reanudación explícita). Fuera de estos
+# estados el checkpoint es HISTÓRICO: no puede presentarse como resultado
+# actual si falta el documento oficial.
+_ESTADOS_CHECKPOINT_VIGENTE = frozenset({
+    "procesando", "pausando", "pausado", "cancelando", "reanudando",
+    "detenido_con_avance"})
+
+
+def _es_fallo_escritura_documento(exc: BaseException) -> bool:
+    """True si la excepción es (o envuelve) un fallo de escritura verificada."""
+    if isinstance(exc, _pdoc.EscrituraFallida):
+        return True
+    return isinstance(getattr(exc, "__cause__", None), _pdoc.EscrituraFallida)
+
+
+def _restaurar_marca_sin_datos(gestor, ruta, previa) -> bool:
+    """R15.4 (HIGH-01): devuelve la marca sin-datos a su estado previo."""
+    try:
+        imagen_hash = hash_archivo(ruta)
+        with gestor._conectar() as con:
+            if previa is None:
+                con.execute("DELETE FROM imagenes_sin_datos WHERE imagen_hash=?",
+                            (imagen_hash,))
+            else:
+                columnas = ",".join(previa.keys())
+                marcas = ",".join("?" * len(previa))
+                con.execute(
+                    f"INSERT OR REPLACE INTO imagenes_sin_datos ({columnas}) "
+                    f"VALUES ({marcas})", tuple(previa.values()))
+        return True
+    except Exception:  # noqa: BLE001 — la compensación no enmascara el error
+        return False
+
+
+def _capturar_revision_estado(gestor, tipo: str, item_id: str) -> dict:
+    """R15.5 (HIGH-03): estado previo de la revisión humana (compensable)."""
+    return gestor.estado_revision(tipo, item_id, "por_revisar")
+
+
+def _restaurar_revision_estado(gestor, tipo: str, item_id: str,
+                               previo: dict) -> bool:
+    """Devuelve la revisión a su estado previo; fila ausente ⇒ DELETE."""
+    try:
+        if not previo or previo.get("actualizado_en") is None:
+            with gestor._conectar() as con:
+                con.execute("DELETE FROM revisiones WHERE tipo=? AND item_id=?",
+                            (tipo, item_id))
+            return True
+        gestor.actualizar_revision(
+            tipo, item_id, estado=previo.get("estado") or "por_revisar",
+            oculto=bool(previo.get("oculto")))
+        return True
+    except Exception:  # noqa: BLE001 — la compensación no enmascara el error
+        return False
+
+
+def _transaccion_efecto_humano(operacion: str, gestor, tipo: str, prueba_id: str,
+                               aplicar_efectos, recurso: "str | None" = None,
+                               ruta_imagen=None, commit_fn=None):
+    """R15.6 (Causa A): helper único «efecto humano + estado de revisión».
+
+    Secuencia transaccional sobre ``TransaccionMultiAlmacen``:
+
+    1. snapshot — evidencias de la imagen + estado de revisión si hay
+       ``ruta_imagen`` (7+3 tablas SQLite y fila de ``revisiones``); si no,
+       sólo el estado de revisión;
+    2. ``aplicar_efectos()`` — efectos durables (SQLite) + revisión humana;
+    3. ``commit_fn(resultado)`` opcional — documento oficial o JSON externo
+       SIEMPRE al final.
+
+    Cualquier fallo ⇒ restauración VERIFICADA (cero efectos persistentes);
+    doble fallo ⇒ inconsistencia durable + bloqueo del recurso. ``ValueError``
+    de los almacenes se traduce a 400 (contrato heredado) tras compensar.
+    """
+    if recurso is not None:
+        _assert_recurso_consistente(recurso, operacion)
+    tx = TransaccionMultiAlmacen(operacion, recurso=recurso)
+    if ruta_imagen is not None:
+        tipo_revision = "externa" if tipo == "externa" else "carpeta"
+        nombre = "evidencias y estado de revisión"
+        capturar = lambda: gestor.snapshot_evidencias_imagen(  # noqa: E731
+            ruta_imagen, prueba_id, tipo_revision=tipo_revision)
+        restaurar = gestor.restaurar_evidencias_imagen
+    else:
+        nombre = "estado de revisión"
+        capturar = lambda: _capturar_revision_estado(  # noqa: E731
+            gestor, tipo, prueba_id)
+        restaurar = lambda estado: _restaurar_revision_estado(  # noqa: E731
+            gestor, tipo, prueba_id, estado)
+    try:
+        _, resultado = tx.aplicar(nombre, capturar, aplicar_efectos, restaurar)
+        if commit_fn is not None:
+            commit_fn(resultado)
+    except BaseException as exc:
+        try:
+            tx.fallar(exc)
+        except HTTPException:
+            raise
+        except ValueError as vexc:
+            raise HTTPException(400, str(vexc)) from vexc
+        except Exception:  # noqa: BLE001 — fallo de almacén, compensado
+            raise HTTPException(503, (
+                f"No se pudo completar '{operacion}' "
+                f"({type(exc).__name__}: {exc}). Los efectos externos fueron "
+                "restaurados; la solicitud no produjo efectos "
+                "persistentes.")) from exc
+    tx.exito()
+    return resultado
+
+
+def _aprendizaje_opcional(resultado: dict, fn, motivo: str) -> None:
+    """R15.6 (política HIGH-01 de R15.5): el entrenamiento automático es un
+    efecto OPCIONAL posterior al commit; si falla, éxito + advertencia."""
+    try:
+        resultado["aprendizaje_visual_automatico"] = fn(motivo)
+    except Exception as exc:  # noqa: BLE001 — nunca revierte la confirmación
+        resultado["aprendizaje_visual_automatico"] = {
+            "programado": False,
+            "error": f"{type(exc).__name__}: {exc}"}
+
+
+def _restaurar_revisiones_video(snapshot: dict) -> bool:
+    """R15.4 (HIGH-01): restaura el registro durable de revisiones de video."""
+    try:
+        from video_airbag import restaurar_revisiones
+        restaurar_revisiones(snapshot)
+        return True
+    except Exception:  # noqa: BLE001 — la compensación no enmascara el error
+        return False
+
+
+def _restaurar_zona_aprendida(ruta_local, estado) -> bool:
+    """R15.5 (P0): restaura el perfil de zona aprendido con verificación.
+
+    ``estado=None`` ⇒ la zona no existía antes: se elimina la creada.
+    """
+    try:
+        from aprendizaje_video_airbag import (eliminar_zona_aprendida,
+                                              restaurar_perfil_zona)
+        if estado is not None:
+            restaurar_perfil_zona(ruta_local, estado)
+        else:
+            eliminar_zona_aprendida(ruta_local)
+        return True
+    except Exception:  # noqa: BLE001 — la compensación no enmascara el error
+        return False
+
+
+# ---------------------------------------------------------------------------
+# R15.5 (P0): coordinador único de mutaciones multi-almacén + registro de
+# estados inconsistentes. Política transaccional común (plan del auditor):
+#   snapshot → efectos externos → commit del documento → ante CUALQUIER
+#   fallo, restaurar TODOS los efectos en orden inverso y VERIFICAR la
+#   restauración. Si la restauración también falla (doble fallo: disco lleno,
+#   antivirus, permisos), se registra una inconsistencia EXPLÍCITA y durable:
+#   las operaciones incompatibles sobre el recurso quedan bloqueadas hasta
+#   resolución manual, y el mensaje nunca afirma «revertido/restaurado»
+#   cuando no lo fue (MEDIUM-05).
+# ---------------------------------------------------------------------------
+RUTA_INCONSISTENCIAS = RAIZ_PROYECTO / ".cache_ocr" / "estado_inconsistente.json"
+# R15.6 (ALTO-03): recuperación fail-closed. Centinela durable del «modo
+# recuperación» (se activa si el registro no pudo escribirse o es ilegible) y
+# auditoría de las resoluciones explícitas (MEDIO-05: quién y cuándo).
+RUTA_RECUPERACION = RAIZ_PROYECTO / ".cache_ocr" / "recuperacion_requerida.json"
+RUTA_AUDITORIA_RESOLUCIONES = RAIZ_PROYECTO / ".cache_ocr" / "inconsistencias_resueltas.json"
+_inconsistencias_lock = threading.Lock()
+_inconsistencias_activas: dict = {}
+_modo_recuperacion: "dict | None" = None
+
+
+def _escribir_json_verificado(ruta: Path, payload: dict) -> None:
+    """R15.6 (ALTO-03): temporal + fsync + replace + relectura de verificación.
+
+    Lanza OSError/ValueError si el resultado no es durable y legible; nunca
+    reporta éxito sin verificar.
+    """
+    import os
+    ruta.parent.mkdir(parents=True, exist_ok=True)
+    temporal = ruta.with_name(ruta.name + ".tmp")
+    with open(temporal, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, ensure_ascii=False, indent=2)
+        fh.flush()
+        os.fsync(fh.fileno())
+    temporal.replace(ruta)
+    with open(ruta, encoding="utf-8") as fh:
+        if json.load(fh) != payload:
+            raise ValueError(f"verificación de escritura fallida en '{ruta.name}'")
+
+
+def _activar_modo_recuperacion(motivo: str) -> None:
+    """Fail-closed: sin registro durable fiable se bloquean las mutaciones
+    gobernadas. El centinela es best-effort: si tampoco puede escribirse, el
+    bloqueo sigue vivo en memoria para el proceso en curso (y el error
+    original ya se está reportando a quien lo provocó). Llamar con
+    ``_inconsistencias_lock`` tomado."""
+    global _modo_recuperacion
+    _modo_recuperacion = {"motivo": motivo,
+                          "fecha": datetime.now().isoformat(timespec="seconds")}
+    try:
+        _escribir_json_verificado(RUTA_RECUPERACION, dict(_modo_recuperacion))
+    except (OSError, ValueError):
+        pass
+
+
+def _mensaje_modo_recuperacion(accion: str, modo: dict) -> str:
+    return (
+        f"No es posible {accion}: el sistema está en MODO RECUPERACIÓN "
+        f"({modo.get('motivo')}). El registro durable de inconsistencias no "
+        "es fiable. Revisa GET /api/recuperacion/inconsistencias y resuelve "
+        "cada entrada con POST /api/recuperacion/inconsistencias/{recurso}/"
+        "resolver (o POST /api/recuperacion/modo-recuperacion/resolver si no "
+        "quedan entradas activas).")
+
+
+def _cargar_inconsistencias() -> None:
+    """(Re)carga el registro durable; los bloqueos sobreviven reinicios.
+
+    R15.6 (ALTO-03): un registro ilegible/corrupto o un centinela de sesión
+    anterior arrancan en MODO RECUPERACIÓN — nunca se ignoran (fail-open).
+    """
+    global _modo_recuperacion
+    with _inconsistencias_lock:
+        _inconsistencias_activas.clear()
+        _modo_recuperacion = None
+        if RUTA_RECUPERACION.is_file():
+            motivo, fecha = "centinela de recuperación de una sesión anterior", ""
+            try:
+                centinela = json.loads(RUTA_RECUPERACION.read_text(encoding="utf-8"))
+                if isinstance(centinela, dict):
+                    motivo = str(centinela.get("motivo") or motivo)
+                    fecha = str(centinela.get("fecha") or "")
+            except (OSError, ValueError):
+                motivo = "centinela de recuperación ilegible"
+            _modo_recuperacion = {"motivo": motivo, "fecha": fecha}
+        try:
+            if RUTA_INCONSISTENCIAS.is_file():
+                datos = json.loads(
+                    RUTA_INCONSISTENCIAS.read_text(encoding="utf-8"))
+                if (not isinstance(datos, dict)
+                        or not isinstance(datos.get("inconsistencias"), list)):
+                    raise ValueError("estructura de registro inválida")
+                for entrada in datos["inconsistencias"]:
+                    recurso = str(entrada.get("recurso") or "")
+                    if recurso:
+                        _inconsistencias_activas[recurso] = entrada
+        except (OSError, ValueError) as exc:
+            _activar_modo_recuperacion(
+                f"registro de inconsistencias ilegible ({exc})")
+
+
+def _persistir_inconsistencias() -> None:
+    """R15.6 (ALTO-03): persistencia VERIFICADA del registro. Si no puede
+    escribirse, activa el modo recuperación (fail-closed) en lugar de ignorar
+    el error en silencio. Llamar con ``_inconsistencias_lock`` tomado."""
+    payload = {"inconsistencias": list(_inconsistencias_activas.values())}
+    try:
+        _escribir_json_verificado(RUTA_INCONSISTENCIAS, payload)
+    except (OSError, ValueError) as exc:
+        _activar_modo_recuperacion(f"registro durable no escribible ({exc})")
+
+
+def _registrar_inconsistencia(recurso: str, operacion: str,
+                              detalle: str) -> None:
+    entrada = {"recurso": str(recurso), "operacion": operacion,
+               "detalle": detalle,
+               "fecha": datetime.now().isoformat(timespec="seconds")}
+    with _inconsistencias_lock:
+        _inconsistencias_activas[str(recurso)] = entrada
+        _persistir_inconsistencias()
+
+
+def _resolver_inconsistencias(recurso: str) -> None:
+    with _inconsistencias_lock:
+        if _inconsistencias_activas.pop(str(recurso), None) is not None:
+            _persistir_inconsistencias()
+
+
+def _assert_recurso_consistente(recurso: str, accion: str) -> None:
+    with _inconsistencias_lock:
+        modo = _modo_recuperacion
+        entrada = _inconsistencias_activas.get(str(recurso))
+    if modo is not None:
+        raise HTTPException(503, _mensaje_modo_recuperacion(accion, modo))
+    if entrada is not None:
+        # R15.6 (MEDIO-05): el mensaje remite al flujo explícito de
+        # recuperación; ya NO pide borrar archivos a mano.
+        raise HTTPException(503, (
+            f"No es posible {accion}: hay un estado potencialmente "
+            f"inconsistente sin resolver en este recurso (operación "
+            f"'{entrada.get('operacion')}', {entrada.get('fecha')}). "
+            "Acción recomendada: verifica el documento de resultados y los "
+            "almacenes de aprendizaje/revisiones y, una vez comprobados, "
+            "resuelve el bloqueo con POST /api/recuperacion/inconsistencias/"
+            "{recurso}/resolver (listado en GET /api/recuperacion/"
+            "inconsistencias)."))
+
+
+def _assert_sistema_recuperable(accion: str) -> None:
+    """R15.6 (ALTO-03): en modo recuperación no hay mutaciones gobernadas."""
+    with _inconsistencias_lock:
+        modo = _modo_recuperacion
+    if modo is not None:
+        raise HTTPException(503, _mensaje_modo_recuperacion(accion, modo))
+
+
+class SolicitudResolucionInconsistencia(BaseModel):
+    """MEDIO-05: confirmación explícita de la verificación manual."""
+    usuario: str = Field(min_length=1, max_length=128)
+    confirmo_verificacion: bool = False
+    nota: str | None = Field(default=None, max_length=2048)
+
+
+def _leer_auditoria_resoluciones() -> list:
+    try:
+        datos = json.loads(
+            RUTA_AUDITORIA_RESOLUCIONES.read_text(encoding="utf-8"))
+        if isinstance(datos, dict) and isinstance(datos.get("resoluciones"), list):
+            return datos["resoluciones"]
+    except (OSError, ValueError):
+        pass
+    return []
+
+
+def _auditar_resolucion(entrada: dict,
+                        solicitud: SolicitudResolucionInconsistencia) -> "str | None":
+    """Registro durable de quién/cuándo resolvió. Best-effort: si la auditoría
+    no puede escribirse, la resolución ya verificada no se revierte; se avisa."""
+    registro = {"recurso": str(entrada.get("recurso") or ""),
+                "operacion": entrada.get("operacion"),
+                "registrada_en": entrada.get("fecha"),
+                "usuario": solicitud.usuario,
+                "nota": solicitud.nota,
+                "resuelta_en": datetime.now().isoformat(timespec="seconds")}
+    try:
+        actuales = _leer_auditoria_resoluciones()
+        _escribir_json_verificado(RUTA_AUDITORIA_RESOLUCIONES,
+                                  {"resoluciones": [*actuales, registro]})
+        return None
+    except (OSError, ValueError) as exc:
+        return f"No se pudo registrar la resolución en la auditoría: {exc}"
+
+
+@app.get("/api/recuperacion/inconsistencias")
+def listar_inconsistencias():
+    """MEDIO-05: listado público de bloqueos activos y modo recuperación."""
+    with _inconsistencias_lock:
+        modo = dict(_modo_recuperacion) if _modo_recuperacion else None
+        entradas = [dict(e) for e in _inconsistencias_activas.values()]
+    return {"modo_recuperacion": modo,
+            "registro": str(RUTA_INCONSISTENCIAS),
+            "centinela": str(RUTA_RECUPERACION),
+            "inconsistencias": entradas,
+            "total": len(entradas),
+            "resoluciones": _leer_auditoria_resoluciones()}
+
+
+@app.post("/api/recuperacion/inconsistencias/{recurso:path}/resolver")
+def resolver_inconsistencia(recurso: str,
+                            solicitud: SolicitudResolucionInconsistencia):
+    """MEDIO-05: resolución explícita tras la verificación manual.
+
+    Sólo limpia memoria + registro durable si la escritura verificada tiene
+    éxito; si falla, el bloqueo se mantiene (fail-closed). Deja auditoría de
+    quién y cuándo, y si no quedan entradas limpia el modo recuperación.
+    """
+    global _modo_recuperacion
+    if not solicitud.confirmo_verificacion:
+        raise HTTPException(400, (
+            "Confirma la verificación manual del documento y los almacenes "
+            "(confirmo_verificacion=true) antes de resolver el bloqueo."))
+    with _inconsistencias_lock:
+        entrada = _inconsistencias_activas.get(recurso)
+        if entrada is None:
+            raise HTTPException(
+                404, "El recurso indicado no tiene inconsistencias activas.")
+        restantes = [dict(v) for k, v in _inconsistencias_activas.items()
+                     if k != recurso]
+        try:
+            _escribir_json_verificado(RUTA_INCONSISTENCIAS,
+                                      {"inconsistencias": restantes})
+        except (OSError, ValueError) as exc:
+            raise HTTPException(503, (
+                f"No se pudo actualizar el registro durable ({exc}); el "
+                "bloqueo se mantiene (fail-closed).")) from exc
+        _inconsistencias_activas.pop(recurso, None)
+        if _modo_recuperacion is not None and not _inconsistencias_activas:
+            _modo_recuperacion = None
+            try:
+                RUTA_RECUPERACION.unlink()
+            except OSError:
+                pass
+        advertencia = _auditar_resolucion(entrada, solicitud)
+        modo = dict(_modo_recuperacion) if _modo_recuperacion else None
+    return {"resuelta": True, "recurso": recurso,
+            "restantes": len(restantes), "modo_recuperacion": modo,
+            "advertencia_auditoria": advertencia}
+
+
+@app.post("/api/recuperacion/modo-recuperacion/resolver")
+def resolver_modo_recuperacion(solicitud: SolicitudResolucionInconsistencia):
+    """ALTO-03/MEDIO-05: limpia el modo recuperación global tras verificación.
+
+    Exige que no queden entradas activas (se resuelven una a una primero),
+    reconstruye el registro durable con escritura verificada y elimina el
+    centinela. Si el registro sigue sin poder escribirse, el modo continúa.
+    """
+    global _modo_recuperacion
+    if not solicitud.confirmo_verificacion:
+        raise HTTPException(400, (
+            "Confirma la verificación manual del documento y los almacenes "
+            "(confirmo_verificacion=true) antes de limpiar el modo "
+            "recuperación."))
+    with _inconsistencias_lock:
+        if _modo_recuperacion is None:
+            raise HTTPException(404, "El sistema no está en modo recuperación.")
+        if _inconsistencias_activas:
+            raise HTTPException(409, (
+                "Quedan inconsistencias activas: resuélvelas una a una con "
+                "POST /api/recuperacion/inconsistencias/{recurso}/resolver "
+                "antes de limpiar el modo recuperación."))
+        try:
+            _escribir_json_verificado(RUTA_INCONSISTENCIAS,
+                                      {"inconsistencias": []})
+        except (OSError, ValueError) as exc:
+            raise HTTPException(503, (
+                f"El registro durable sigue sin poder escribirse ({exc}); el "
+                "modo recuperación se mantiene.")) from exc
+        _modo_recuperacion = None
+        try:
+            RUTA_RECUPERACION.unlink()
+        except OSError:
+            pass
+        advertencia = _auditar_resolucion(
+            {"recurso": "(modo recuperación)",
+             "operacion": "modo_recuperacion",
+             "fecha": datetime.now().isoformat(timespec="seconds")},
+            solicitud)
+    return {"resuelta": True, "modo_recuperacion": None,
+            "advertencia_auditoria": advertencia}
+
+
+_cargar_inconsistencias()
+
+
+class TransaccionMultiAlmacen:
+    """R15.5 (P0): política transaccional común para rutas multi-almacén.
+
+    Uso::
+
+        tx = TransaccionMultiAlmacen("operación", recurso=str(ruta))
+        estado = tx.capturar("efecto", capturar, restaurar)  # restaurar(estado)→bool
+        try:
+            ...aplicar el efecto externo...
+            tx.aplicado()          # el efecto QUEDÓ aplicado: se compensará
+            ...commit del documento...
+        except BaseException as exc:
+            tx.fallar(exc)   # compensa, verifica, registra y traduce
+        tx.exito()           # resuelve inconsistencias previas del recurso
+
+    Si la APLICACIÓN del efecto falla, no se llama ``aplicado()`` y el efecto
+    no se registra: los almacenes usan escritura atómica/verificada, así que
+    o no cambiaron o están inaccesibles — y el error original ya lo dice.
+    Registrarlo produciría una «inconsistencia» falsa cuando el almacén está
+    simplemente caído (el fallo de compensación enmascararía el error real).
+    """
+
+    def __init__(self, operacion: str, recurso: "str | None" = None):
+        self.operacion = operacion
+        self.recurso = str(recurso) if recurso is not None else None
+        self._efectos: list = []  # (nombre, restaurar: () -> bool)
+        self._pendiente = None
+        self.fallos_restauracion: list = []
+        self.inconsistente = False
+
+    def capturar(self, nombre: str, capturar, restaurar):
+        """Captura el estado previo; se registrará al confirmar ``aplicado()``."""
+        estado = capturar()
+        self._pendiente = (nombre, lambda: bool(restaurar(estado)))
+        return estado
+
+    def aplicado(self) -> None:
+        """Confirma que el efecto capturado se aplicó: registra su
+        restauración verificada para la compensación."""
+        if self._pendiente is not None:
+            self._efectos.append(self._pendiente)
+            self._pendiente = None
+
+    def aplicar(self, nombre: str, capturar, aplicar_fn, restaurar):
+        """Captura → aplica → registra, con la misma política verificada.
+
+        Si la aplicación falla a mitad (estado parcial/incierto), el efecto se
+        registra de todos modos y se compensa; si la restauración también
+        falla ⇒ inconsistencia explícita. Devuelve ``(estado, resultado)``.
+        """
+        estado = self.capturar(nombre, capturar, restaurar)
+        try:
+            resultado = aplicar_fn()
+        except BaseException:
+            # Aplicación parcial/incierta ⇒ el efecto queda registrado para
+            # la compensación; quien captura el error llama ``fallar`` una vez.
+            self.aplicado()
+            raise
+        self.aplicado()
+        return estado, resultado
+
+    def compensar(self) -> bool:
+        """Restaura los efectos registrados en orden inverso; True si todos
+        quedaron verificados."""
+        self.fallos_restauracion = []
+        for nombre, restaurar in reversed(self._efectos):
+            try:
+                ok = bool(restaurar())
+            except Exception:  # noqa: BLE001 — la compensación no enmascara
+                ok = False
+            if not ok:
+                self.fallos_restauracion.append(nombre)
+        self.inconsistente = bool(self.fallos_restauracion)
+        if self.inconsistente and self.recurso is not None:
+            _registrar_inconsistencia(
+                self.recurso, self.operacion,
+                "restauración automática fallida de: "
+                + ", ".join(self.fallos_restauracion))
+        return not self.inconsistente
+
+    def exito(self) -> None:
+        if self.recurso is not None:
+            _resolver_inconsistencias(self.recurso)
+
+    def fallar(self, exc: BaseException):
+        """Compensa y traduce el fallo a respuesta HTTP controlada.
+
+        MEDIUM-05: el resultado del rollback NUNCA se ignora — si la
+        restauración falló, el mensaje declara estado potencialmente
+        inconsistente (jamás afirma «revertido») y el recurso queda bloqueado.
+        """
+        self.compensar()
+        if self.inconsistente:
+            raise HTTPException(503, (
+                "ATENCIÓN: estado potencialmente inconsistente. La operación "
+                f"'{self.operacion}' falló y la restauración automática no "
+                "pudo completarse ("
+                + ", ".join(self.fallos_restauracion) + "). "
+                f"Recurso afectado: {self.recurso or 'n/d'}. "
+                "Acción manual recomendada: verifica el documento de "
+                "resultados y los almacenes de aprendizaje/revisiones; las "
+                "operaciones incompatibles sobre este recurso quedan "
+                "bloqueadas hasta que se resuelva.")) from exc
+        if _es_fallo_escritura_documento(exc):
+            raise HTTPException(503, _MSG_GUARDADO_FALLO + (
+                " Los efectos externos fueron restaurados; la solicitud no "
+                "produjo efectos persistentes.")) from exc
+        raise exc
+
+
+def mutar_documento(mutacion, expected_revision: "int | None" = None,
+                    *, permitir_ausente: bool = False, estricto: bool = False):
+    """R15.2: delega en la primitiva compartida y traduce a HTTP.
+
+    Ver ``utilidades.persistencia_documento.mutar_documento`` para el
+    contrato completo (fresh-read bajo lock, CAS, monotonía, escritura
+    verificada). Las callbacks reciben el documento FRESCO, aplican sólo su
+    propio patch y NO deben llamar a ``_cargar_datos()``. Devuelve
+    ``(revision_nueva, resultado_de_mutacion)``.
+
+    ``estricto=True`` (R15.2 ALTO-04, mutaciones humanas): documento ya
+    versionado exige ``expected_revision`` explícita.
+    """
+    try:
+        return _pdoc.mutar_documento(
+            RUTA_VALIDACION, mutacion, expected_revision,
+            estricto=estricto, permitir_ausente=permitir_ausente,
+            post_commit=_invalidar_cache_documento)
+    except _pdoc.ConflictoRevision as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except _pdoc.DocumentoAusente as exc:
+        raise HTTPException(404, "Sin datos procesados.") from exc
+    except _pdoc.FormatoInvalido as exc:
+        raise HTTPException(503, str(exc)) from exc
+    except _pdoc.EscrituraFallida as exc:
+        # R15.4 (HIGH-01): fallo de guardado ⇒ 503 controlado con mensaje
+        # claro; nunca un 500 crudo ni la impresión de que se guardó.
+        raise HTTPException(503, _MSG_GUARDADO_FALLO) from exc
+
+
+def _leer_documento_disco() -> dict:
+    """Lee el documento de resultados directo del disco (sin caché).
+
+    R15.2: delega en la autoridad compartida; se usa dentro de los commits
+    bajo lock, donde hace falta la última versión persistida para fusionar
+    cambios concurrentes.
+    """
+    try:
+        return _pdoc.leer_fresco(RUTA_VALIDACION)
+    except _pdoc.DocumentoAusente as exc:
+        raise HTTPException(404, "Sin datos procesados.") from exc
+    except _pdoc.FormatoInvalido as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
+def _commit_documento(datos: dict) -> int:
+    """Persiste el documento incrementando ``revision_documento``.
+
+    R15.2: delega en la autoridad compartida. Requiere tener
+    ``_lock_documento()`` adquirido. La escritura es verificada: nunca se
+    devuelve éxito si el guardado falló.
+    """
+    return _pdoc.commit_documento(RUTA_VALIDACION, datos,
+                                  post_commit=_invalidar_cache_documento)
+
+
+def _verificar_expected_revision(expected: "int | None", datos: dict,
+                                 *, estricto: bool = False) -> None:
+    """MEDIA-14: CAS de documento; una pantalla vieja debe recargar (409).
+
+    R15.1 (ALTO-02): con ``estricto=True`` (endpoints mutantes R15), un
+    documento YA versionado rechaza ``expected_revision=None``: una pestaña
+    vieja no puede bypasear el CAS omitiendo el campo. Los documentos sin
+    versionar (legacy, previos a R15) aceptan la primera mutación, que los
+    versiona. R15.2: la regla vive en la autoridad compartida (idéntica para
+    backend, pipeline y cualquier escritor futuro).
+    """
+    try:
+        _pdoc.verificar_expected_revision(expected, datos, estricto=estricto)
+    except _pdoc.ConflictoRevision as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+def _guard_mutacion_video(accion: str) -> None:
+    """ALTA-07: guard servidor para mutaciones de video.
+
+    Mismo patrón que /api/video/maximo: 409 si hay pipeline activo, slot
+    reservado (admisión en curso, R15) o reanálisis de videos en curso.
+    R15.6 (ALTO-03): en modo recuperación tampoco hay mutaciones de video.
+    """
+    _assert_sistema_recuperable(accion)
+    with _pipeline_lock, _video_reanalisis_lock:
+        if (_pipeline_estado.get("estado") in {"procesando", "pausando", "pausado",
+                                               "cancelando", "reanudando"}
+                or _slot_pipeline_ocupado_locked()):
+            raise HTTPException(409, f"Termina o detén el procesamiento antes de {accion}.")
+        if _video_reanalisis_hilo is not None and _video_reanalisis_hilo.is_alive():
+            raise HTTPException(409, f"Hay un reanálisis de videos en curso; termínalo antes de {accion}.")
+
+
+def _assert_pipeline_inactivo(accion: str, *,
+                              incluir_reanalisis: bool = False) -> None:
+    """R15.6 (Causa B, ALTO-08/09/10): guard uniforme de pipeline.
+
+    Sustituye los checks locales de ``_pipeline_hilo.is_alive()`` que
+    ignoraban la reserva atómica del slot de worker (ventana TOCTOU entre la
+    admisión y el arranque del hilo) y los estados transitorios. Cubre:
+    hilo vivo, reserva tomada, estado de procesamiento (incluido pausado) y,
+    con ``incluir_reanalisis=True``, el reanálisis de videos en curso (el
+    caso todavía puede estar siendo modificado).
+    """
+    _assert_sistema_recuperable(accion)
+    with _pipeline_lock:
+        if (_pipeline_estado.get("estado") in {"procesando", "pausando", "pausado",
+                                               "cancelando", "reanudando"}
+                or _slot_pipeline_ocupado_locked()):
+            raise HTTPException(409, f"Termina o detén el procesamiento antes de {accion}.")
+    if incluir_reanalisis:
+        with _video_reanalisis_lock:
+            if _video_reanalisis_hilo is not None and _video_reanalisis_hilo.is_alive():
+                raise HTTPException(409, (
+                    "Hay un reanálisis de videos en curso; termínalo antes de "
+                    f"{accion}."))
+
+
+def _assert_documento_editable(accion: str = "editar el documento") -> None:
+    """R15.2 (CRÍTICO-02, P0 temporal): UI y pipeline no editan a la vez.
+
+    Mientras el worker del pipeline (o su slot reservado) posee el documento,
+    los endpoints mutantes de UI lo rechazan con 409 ANTES de cualquier
+    lookup o efecto lateral; las lecturas siguen disponibles y el frontend
+    muestra «procesamiento activo». El reanálisis de videos NO bloquea: sus
+    commits fusionan por video bajo el mismo lock compartido (R15).
+    """
+    # R15.6 (ALTO-03): en modo recuperación no se edita el documento.
+    _assert_sistema_recuperable(accion)
+    with _pipeline_lock:
+        if (_pipeline_estado.get("estado") in {"procesando", "pausando", "pausado",
+                                               "cancelando", "reanudando"}
+                or _slot_pipeline_ocupado_locked()):
+            raise HTTPException(409, f"Termina o detén el procesamiento antes de {accion}.")
+
+
+def _prechequeo_cas_documento(expected_revision: "int | None", *,
+                              estricto: bool = True) -> None:
+    """R15.2 (ALTO-04): CAS ANTES de cualquier efecto lateral irreversible.
+
+    Endpoints que registran evidencia en la base de aprendizaje (correcciones,
+    marcas sin-datos) antes de mutar el documento deben verificar primero
+    ``expected_revision`` contra el disco: una pestaña desactualizada recibe
+    409 sin haber generado efectos. El CAS definitivo se repite dentro de
+    ``mutar_documento`` (autoritativo, bajo lock).
+    """
+    with _lock_documento():
+        try:
+            frescos = _pdoc.leer_fresco(RUTA_VALIDACION)
+        except _pdoc.DocumentoAusente:
+            return  # sin documento aún: mutar_documento decidirá (404/crear)
+        except _pdoc.FormatoInvalido as exc:
+            raise HTTPException(503, str(exc)) from exc
+        try:
+            _pdoc.verificar_expected_revision(expected_revision, frescos,
+                                              estricto=estricto)
+        except _pdoc.ConflictoRevision as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+
+def _verificar_revision_no_completada(prueba_id: str, fila: dict, accion: str) -> None:
+    """ALTA-07: el servidor es autoritativo; revisión completada ⇒ 409.
+
+    ``estado_inicial`` es sólo el fallback del gestor cuando no hay registro
+    en su BD (y los valores inválidos se coercen a «por_revisar»): si la fila
+    está incompleta para ``_fila_publica``, se degrada a ese valor por diseño.
+    """
+    try:
+        inicial = _fila_publica(fila)["revision"]["estado"]
+    except (KeyError, TypeError, ValueError):
+        inicial = "por_revisar"
+    estado = GestorAprendizaje(CONFIG).estado_revision("carpeta", prueba_id, inicial)
+    if estado.get("estado") == "completada":
+        raise HTTPException(409, f"Reabre la revisión antes de {accion}.")
+
+
+def _localizar_fila_video(datos: dict, prueba_id: str, video_id: str):
+    """Localiza (fila, video_item) en un documento; 404 si no existen."""
+    fila = next((f for f in datos.get("resultados", [])
+                 if _id_fila(f) == prueba_id), None)
+    if fila is None:
+        raise HTTPException(404, "No existe el ID solicitado.")
+    video_item = next((v for v in (fila.get("videos") or [])
+                       if str(v.get("id")) == str(video_id)), None)
+    if video_item is None:
+        raise HTTPException(404, "Video no encontrado en este ID.")
+    return fila, video_item
 
 
 def _id_fila(fila: dict) -> str:
@@ -1153,6 +2062,20 @@ def _guardar_json_atomico(ruta: Path, documento: dict) -> None:
     # El JSON consolidado puede ser grande; el formato compacto conserva el
     # contenido exacto y reduce el tiempo de serialización/escritura.
     escribir_json_seguro(ruta, documento, lanzar=True, compacto=True)
+
+
+def _commit_documento_externo(salida: Path, documento: dict) -> int:
+    """R15.6 (ALTO-04): commit verificado del documento de pruebas externas.
+
+    ``revision_documento`` monotónica + escritura atómica verificada. Exige
+    tener adquirido el lock por ruta (``lock_documento(salida)``): la misma
+    autoridad que protege el documento principal cubre lectura fresca →
+    patch → commit de las ramas externas humanas.
+    """
+    revision = int(documento.get("revision_documento") or 0) + 1
+    documento["revision_documento"] = revision
+    _guardar_json_atomico(salida, documento)
+    return revision
 
 
 def _buscar_unidad_ocr(unidades: list[dict], texto: str,
@@ -2590,6 +3513,13 @@ def rollback_modelo_visual(solicitud: SolicitudRollback):
 
 @app.post("/api/aprendizaje/correcciones")
 def corregir_lectura(solicitud: SolicitudCorreccion):
+    _assert_documento_editable("guardar la corrección")
+    # R15.3 (ALTO-02): si esta corrección persistirá confirmación/campo en el
+    # documento, CAS + efectos sqlite + commit ocurren en la MISMA región de
+    # exclusión (más abajo): un 409 ya no puede emitirse con efectos durables.
+    va_a_mutar_documento = (solicitud.accion not in {"ilegible", "no_es_campo"}
+                            and bool(getattr(solicitud, "componente", None)
+                                     or getattr(solicitud, "campo_destino", None)))
     datos = _cargar_datos()
     if not datos:
         raise HTTPException(404, "Sin datos procesados.")
@@ -2625,158 +3555,214 @@ def corregir_lectura(solicitud: SolicitudCorreccion):
     if token is None:
         raise HTTPException(
             400, "La lectura OCR no coincide de forma única; vuelve a seleccionarla en la imagen.")
-    try:
-        texto_actual = str(token.get("texto") or solicitud.texto_ocr)
-        texto_original = str(token.get("texto_original") or texto_actual)
-        correcto = texto_actual if solicitud.accion == "aceptar" else solicitud.texto_correcto
-        estado_supervision = ("aceptado_provisional" if solicitud.accion == "aceptar"
-                              else "corregido_humano" if solicitud.accion in {
-                                  "corregir", "guardar_sin_entrenar", "confirmar_entrenar"}
-                              else solicitud.accion)
-        metadatos_supervision = {k: fila.get(k) for k in
-            ("tipo_st", "module_version", "temperature_condition", "inflator_type")}
-        metadatos_supervision.update({
-            "project_id": fila.get("project_id"),
-            "case_key": fila.get("case_key"),
-            "componente": getattr(solicitud, "componente", None) or "por_identificar",
-            "campo_propuesto": getattr(solicitud, "campo_destino", None),
-            "campo_fuente": solicitud.campo,
-            "bbox_original": token.get("bbox"),
-            "texto_ocr_original": texto_original,
-            "texto_lectura_previa": texto_actual,
-            "estado_supervision": estado_supervision,
-            "fuente_supervision": "aceptar_ocr" if solicitud.accion == "aceptar" else "dashboard",
-            "giro_foto": float(ocr.get("orientacion_texto_grados") or 0),
-            "poligono_lectura": token.get("poligono_lectura"),
-            "orientacion_region_grados": token.get("orientacion_region_grados"),
-            "marco_region": token.get("marco_region"),
-            "estrategia_ocr_confirmada": getattr(solicitud, "estrategia_ocr", None),
-        })
-        if (getattr(solicitud, "campo_destino", None) == "opening_time_ms"
-                and solicitud.accion not in {"aceptar", "ilegible", "no_es_campo"}):
-            try:
-                tiempo_apertura = float(str(correcto).strip().replace(",", "."))
-            except (TypeError, ValueError, OverflowError) as exc:
-                raise ValueError("El tiempo de apertura debe ser numérico, finito y > 0 ms.") from exc
-            if not math.isfinite(tiempo_apertura) or tiempo_apertura <= 0 or tiempo_apertura > 1000:
-                raise ValueError("El tiempo de apertura debe ser finito, > 0 y ≤ 1000 ms.")
-        if token.get("edicion_zona") and solicitud.accion not in {"ilegible", "no_es_campo"}:
-            from utilidades.edicion_zonas import guardar_bloque
-            if not correcto.strip():
-                raise ValueError("Escribe o confirma el texto del bloque.")
-            if correcto != token.get("texto"):
-                with gestor._conectar() as con:
-                    guardar_bloque(con, hash_archivo(ruta_local), ocr, list(token["bbox"]),
-                                   [{"bbox": list(token["bbox"]), "texto": correcto}])
-            accion_muestra = ("aceptar" if solicitud.accion == "aceptar" else "confirmar_entrenar")
-            muestra = gestor.registrar_muestra_visual(
-                ruta_local, solicitud.prueba_id,
-                texto_actual if solicitud.accion == "aceptar" else texto_original,
-                correcto, token.get("bbox"), accion=accion_muestra,
-                entrenable=accion_muestra != "aceptar",
-                campo=getattr(solicitud, "campo_destino", None) or solicitud.campo,
-                fase=item.get("fase"), tor=item.get("tor"),
-                confianza=token.get("confianza"), modelo_origen=ocr.get("modelo_visual_version")
-                or ocr.get("motor"), usuario=solicitud.usuario, metadatos=metadatos_supervision)
-            resultado = {"registrada": True, "tipo": "supervision_visual",
-                         "estado_supervision": estado_supervision,
-                         "entrenamiento": None, "muestra_visual": muestra}
-        elif solicitud.accion in {"ilegible", "no_es_campo"}:
-            muestra = gestor.registrar_muestra_visual(
-                ruta_local, solicitud.prueba_id, solicitud.texto_ocr, correcto,
-                token.get("bbox"), accion=solicitud.accion, entrenable=False,
-                campo=getattr(solicitud, "campo_destino", None) or solicitud.campo,
-                fase=item.get("fase"), tor=item.get("tor"),
-                confianza=token.get("confianza"), modelo_origen=ocr.get("modelo_visual_version")
-                or ocr.get("motor"), usuario=solicitud.usuario,
-                metadatos=metadatos_supervision)
-            resultado = {"registrada": True, "tipo": "supervision_visual",
-                         "muestra_visual": muestra, "entrenamiento": None}
-        else:
-            if not correcto.strip():
-                raise ValueError("Escribe el texto correcto antes de confirmar.")
-            resultado = gestor.registrar_correccion(
-                texto_actual, correcto, ruta_imagen=str(ruta_local),
-                bbox=token.get("bbox"), fuente="dashboard", caso_id=solicitud.prueba_id,
-                accion=solicitud.accion,
-                entrenar_visual=True,
-                campo=getattr(solicitud, "campo_destino", None) or solicitud.campo,
-                fase=item.get("fase"), tor=item.get("tor"),
-                confianza=token.get("confianza"), modelo_origen=ocr.get("modelo_visual_version")
-                or ocr.get("motor"), usuario=solicitud.usuario,
-                metadatos=metadatos_supervision)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    if isinstance(resultado, dict):
-        resultado.setdefault("estado_supervision", estado_supervision)
-    estrategia_confirmada = getattr(solicitud, "estrategia_ocr", None)
-    if (estrategia_confirmada and solicitud.accion not in {"ilegible", "no_es_campo"}
-            and token.get("bbox") is not None):
+    # R15.3 (ALTO-02): región de exclusión del documento — CAS autoritativo,
+    # efectos durables (sqlite/entrenamiento) y commit atómicos. Las rutas
+    # que NO mutan el documento (ilegible/no_es_campo sin destino) conservan
+    # su comportamiento anterior sin tomar el lock.
+    # R15.6 (ALTO-02): la operación completa —evidencias SQLite, estado de
+    # revisión y commit documental— queda bajo el coordinador común en TODAS
+    # sus ramas (incluidas ilegible/no_es_campo, que antes no capturaban
+    # snapshot). Doble fallo ⇒ inconsistencia durable + bloqueo del caso.
+    _assert_recurso_consistente(f"carpeta:{solicitud.prueba_id}",
+                                "guardar la corrección")
+    with _lock_documento() if va_a_mutar_documento else contextlib.nullcontext():
+        if va_a_mutar_documento:
+            _prechequeo_cas_documento(solicitud.expected_revision)
+        tx = TransaccionMultiAlmacen(
+            "corrección de lectura",
+            recurso=f"carpeta:{solicitud.prueba_id}")
+        tx.capturar(
+            "evidencias y estado de revisión",
+            lambda: gestor.snapshot_evidencias_imagen(
+                ruta_local, caso_id=solicitud.prueba_id),
+            gestor.restaurar_evidencias_imagen)
+        tx.aplicado()  # el bloque siguiente ES el efecto: compensar si falla
         try:
-            contexto_estrategia = {
-                "project_id": fila.get("project_id"), "tipo_st": fila.get("tipo_st"),
-                "module_version": fila.get("module_version"), "fase": item.get("fase"),
-                "componente": getattr(solicitud, "componente", None) or "por_identificar",
-                "campo": getattr(solicitud, "campo_destino", None) or solicitud.campo,
-            }
-            estrategia_guardada = gestor.registrar_estrategia_ocr(
-                str(ruta_local), token.get("bbox"), ocr.get("dimensiones") or [],
-                estrategia_confirmada, caso_id=solicitud.prueba_id,
-                contexto=contexto_estrategia, usuario=solicitud.usuario)
-            resultado["estrategia_ocr_guardada"] = estrategia_guardada
-            _limpiar_cache_variantes()
-        except (ValueError, OSError) as exc:
-            resultado["advertencia_estrategia_ocr"] = str(exc)
-    gestor.actualizar_revision("carpeta", solicitud.prueba_id, estado="parcial")
-    # La selección de componente/campo del editor es una confirmación explícita
-    # distinta del entrenamiento OCR. Se guarda en el JSON consolidado para que
-    # sobreviva al reinicio y llegue a Excel; no se propaga a otros casos.
-    # getattr mantiene compatibilidad con clientes/pruebas antiguos que aún no
-    # envían estos campos opcionales.
-    componente_supervision = getattr(solicitud, "componente", None)
-    campo_destino = getattr(solicitud, "campo_destino", None)
-    if solicitud.accion not in {"ilegible", "no_es_campo"} and (
-            componente_supervision or campo_destino):
-        evidencia = {
-            "imagen_id": solicitud.imagen_id, "imagen": item.get("ruta"),
-            "bbox_original": token.get("bbox"),
-            "texto_ocr_original": texto_original,
-            "texto_lectura_previa": texto_actual,
-            "texto_corregido": correcto,
-            "estado_supervision": estado_supervision,
-            "fuente": "aceptar_ocr" if solicitud.accion == "aceptar" else "correccion_manual",
-            "orientacion_grados": token.get("orientacion_region_grados")
-                if token.get("orientacion_region_grados") is not None
-                else ocr.get("orientacion_texto_grados"),
-        }
-        fila.setdefault("confirmaciones_extraccion", []).append({
-            **evidencia, "componente": componente_supervision or "por_identificar",
-            "campo": campo_destino, "usuario": solicitud.usuario,
-            "fecha": datetime.now().isoformat(timespec="seconds")})
-        if (campo_destino and fila.get("perfil") == "empresarial"
-                and solicitud.accion not in {"aceptar", "ilegible", "no_es_campo"}):
             try:
-                dato = _aplicar_campo_manual_en_fila(
-                    fila, campo_destino, correcto, solicitud.usuario,
-                    componente_supervision, evidencia)
-                resultado["campo_confirmado"] = {"campo": campo_destino, "dato": dato}
+                texto_actual = str(token.get("texto") or solicitud.texto_ocr)
+                texto_original = str(token.get("texto_original") or texto_actual)
+                correcto = texto_actual if solicitud.accion == "aceptar" else solicitud.texto_correcto
+                estado_supervision = ("aceptado_provisional" if solicitud.accion == "aceptar"
+                                      else "corregido_humano" if solicitud.accion in {
+                                          "corregir", "guardar_sin_entrenar", "confirmar_entrenar"}
+                                      else solicitud.accion)
+                metadatos_supervision = {k: fila.get(k) for k in
+                    ("tipo_st", "module_version", "temperature_condition", "inflator_type")}
+                metadatos_supervision.update({
+                    "project_id": fila.get("project_id"),
+                    "case_key": fila.get("case_key"),
+                    "componente": getattr(solicitud, "componente", None) or "por_identificar",
+                    "campo_propuesto": getattr(solicitud, "campo_destino", None),
+                    "campo_fuente": solicitud.campo,
+                    "bbox_original": token.get("bbox"),
+                    "texto_ocr_original": texto_original,
+                    "texto_lectura_previa": texto_actual,
+                    "estado_supervision": estado_supervision,
+                    "fuente_supervision": "aceptar_ocr" if solicitud.accion == "aceptar" else "dashboard",
+                    "giro_foto": float(ocr.get("orientacion_texto_grados") or 0),
+                    "poligono_lectura": token.get("poligono_lectura"),
+                    "orientacion_region_grados": token.get("orientacion_region_grados"),
+                    "marco_region": token.get("marco_region"),
+                    "estrategia_ocr_confirmada": getattr(solicitud, "estrategia_ocr", None),
+                })
+                if (getattr(solicitud, "campo_destino", None) == "opening_time_ms"
+                        and solicitud.accion not in {"aceptar", "ilegible", "no_es_campo"}):
+                    try:
+                        tiempo_apertura = float(str(correcto).strip().replace(",", "."))
+                    except (TypeError, ValueError, OverflowError) as exc:
+                        raise ValueError("El tiempo de apertura debe ser numérico, finito y > 0 ms.") from exc
+                    if not math.isfinite(tiempo_apertura) or tiempo_apertura <= 0 or tiempo_apertura > 1000:
+                        raise ValueError("El tiempo de apertura debe ser finito, > 0 y ≤ 1000 ms.")
+                if token.get("edicion_zona") and solicitud.accion not in {"ilegible", "no_es_campo"}:
+                    from utilidades.edicion_zonas import guardar_bloque
+                    if not correcto.strip():
+                        raise ValueError("Escribe o confirma el texto del bloque.")
+                    if correcto != token.get("texto"):
+                        with gestor._conectar() as con:
+                            guardar_bloque(con, hash_archivo(ruta_local), ocr, list(token["bbox"]),
+                                           [{"bbox": list(token["bbox"]), "texto": correcto}])
+                    accion_muestra = ("aceptar" if solicitud.accion == "aceptar" else "confirmar_entrenar")
+                    muestra = gestor.registrar_muestra_visual(
+                        ruta_local, solicitud.prueba_id,
+                        texto_actual if solicitud.accion == "aceptar" else texto_original,
+                        correcto, token.get("bbox"), accion=accion_muestra,
+                        entrenable=accion_muestra != "aceptar",
+                        campo=getattr(solicitud, "campo_destino", None) or solicitud.campo,
+                        fase=item.get("fase"), tor=item.get("tor"),
+                        confianza=token.get("confianza"), modelo_origen=ocr.get("modelo_visual_version")
+                        or ocr.get("motor"), usuario=solicitud.usuario, metadatos=metadatos_supervision)
+                    resultado = {"registrada": True, "tipo": "supervision_visual",
+                                 "estado_supervision": estado_supervision,
+                                 "entrenamiento": None, "muestra_visual": muestra}
+                elif solicitud.accion in {"ilegible", "no_es_campo"}:
+                    muestra = gestor.registrar_muestra_visual(
+                        ruta_local, solicitud.prueba_id, solicitud.texto_ocr, correcto,
+                        token.get("bbox"), accion=solicitud.accion, entrenable=False,
+                        campo=getattr(solicitud, "campo_destino", None) or solicitud.campo,
+                        fase=item.get("fase"), tor=item.get("tor"),
+                        confianza=token.get("confianza"), modelo_origen=ocr.get("modelo_visual_version")
+                        or ocr.get("motor"), usuario=solicitud.usuario,
+                        metadatos=metadatos_supervision)
+                    resultado = {"registrada": True, "tipo": "supervision_visual",
+                                 "muestra_visual": muestra, "entrenamiento": None}
+                else:
+                    if not correcto.strip():
+                        raise ValueError("Escribe el texto correcto antes de confirmar.")
+                    resultado = gestor.registrar_correccion(
+                        texto_actual, correcto, ruta_imagen=str(ruta_local),
+                        bbox=token.get("bbox"), fuente="dashboard", caso_id=solicitud.prueba_id,
+                        accion=solicitud.accion,
+                        entrenar_visual=True,
+                        campo=getattr(solicitud, "campo_destino", None) or solicitud.campo,
+                        fase=item.get("fase"), tor=item.get("tor"),
+                        confianza=token.get("confianza"), modelo_origen=ocr.get("modelo_visual_version")
+                        or ocr.get("motor"), usuario=solicitud.usuario,
+                        metadatos=metadatos_supervision)
             except ValueError as exc:
                 raise HTTPException(400, str(exc)) from exc
-        elif campo_destino and solicitud.accion == "aceptar":
-            resultado["campo_provisional"] = {
-                "campo": campo_destino, "valor": correcto,
-                "estado_supervision": "aceptado_provisional",
-                "requiere_revision": True,
-            }
-        guardado = _guardar_json_atomico(RUTA_VALIDACION, datos)
-        if guardado is False:
-            raise HTTPException(500, "La corrección OCR se guardó, pero no se pudo persistir su clasificación de campo.")
-        _cache.update({"mtime": None, "datos": None})
+            if isinstance(resultado, dict):
+                resultado.setdefault("estado_supervision", estado_supervision)
+            estrategia_confirmada = getattr(solicitud, "estrategia_ocr", None)
+            if (estrategia_confirmada and solicitud.accion not in {"ilegible", "no_es_campo"}
+                    and token.get("bbox") is not None):
+                try:
+                    contexto_estrategia = {
+                        "project_id": fila.get("project_id"), "tipo_st": fila.get("tipo_st"),
+                        "module_version": fila.get("module_version"), "fase": item.get("fase"),
+                        "componente": getattr(solicitud, "componente", None) or "por_identificar",
+                        "campo": getattr(solicitud, "campo_destino", None) or solicitud.campo,
+                    }
+                    estrategia_guardada = gestor.registrar_estrategia_ocr(
+                        str(ruta_local), token.get("bbox"), ocr.get("dimensiones") or [],
+                        estrategia_confirmada, caso_id=solicitud.prueba_id,
+                        contexto=contexto_estrategia, usuario=solicitud.usuario)
+                    resultado["estrategia_ocr_guardada"] = estrategia_guardada
+                    _limpiar_cache_variantes()
+                except (ValueError, OSError) as exc:
+                    resultado["advertencia_estrategia_ocr"] = str(exc)
+            gestor.actualizar_revision("carpeta", solicitud.prueba_id, estado="parcial")
+            # La selección de componente/campo del editor es una confirmación explícita
+            # distinta del entrenamiento OCR. Se guarda en el JSON consolidado para que
+            # sobreviva al reinicio y llegue a Excel; no se propaga a otros casos.
+            # getattr mantiene compatibilidad con clientes/pruebas antiguos que aún no
+            # envían estos campos opcionales.
+            componente_supervision = getattr(solicitud, "componente", None)
+            campo_destino = getattr(solicitud, "campo_destino", None)
+            if solicitud.accion not in {"ilegible", "no_es_campo"} and (
+                    componente_supervision or campo_destino):
+                evidencia = {
+                    "imagen_id": solicitud.imagen_id, "imagen": item.get("ruta"),
+                    "bbox_original": token.get("bbox"),
+                    "texto_ocr_original": texto_original,
+                    "texto_lectura_previa": texto_actual,
+                    "texto_corregido": correcto,
+                    "estado_supervision": estado_supervision,
+                    "fuente": "aceptar_ocr" if solicitud.accion == "aceptar" else "correccion_manual",
+                    "orientacion_grados": token.get("orientacion_region_grados")
+                        if token.get("orientacion_region_grados") is not None
+                        else ocr.get("orientacion_texto_grados"),
+                }
+                confirmacion = {
+                    **evidencia, "componente": componente_supervision or "por_identificar",
+                    "campo": campo_destino, "usuario": solicitud.usuario,
+                    "fecha": datetime.now().isoformat(timespec="seconds")}
+                if campo_destino and solicitud.accion == "aceptar":
+                    resultado["campo_provisional"] = {
+                        "campo": campo_destino, "valor": correcto,
+                        "estado_supervision": "aceptado_provisional",
+                        "requiere_revision": True,
+                    }
+
+                # R15.1 (CRÍTICO-01): la clasificación se persiste sobre el documento
+                # fresco bajo lock; un ValueError de campo aborta SIN commitear nada.
+                def _persistir_en_fresco(frescos: dict):
+                    fila_f = next((f for f in frescos.get("resultados", [])
+                                   if _id_fila(f) == solicitud.prueba_id), None)
+                    if fila_f is None:
+                        raise HTTPException(404, "La prueba indicada ya no existe.")
+                    fila_f.setdefault("confirmaciones_extraccion", []).append(confirmacion)
+                    if (campo_destino and fila_f.get("perfil") == "empresarial"
+                            and solicitud.accion not in {"aceptar", "ilegible", "no_es_campo"}):
+                        try:
+                            return _aplicar_campo_manual_en_fila(
+                                fila_f, campo_destino, correcto, solicitud.usuario,
+                                componente_supervision, evidencia)
+                        except ValueError as exc:
+                            raise HTTPException(400, str(exc)) from exc
+                    return None
+
+                revision_documento, dato = mutar_documento(
+                    _persistir_en_fresco, solicitud.expected_revision, estricto=True)
+                if dato is not None:
+                    resultado["campo_confirmado"] = {"campo": campo_destino, "dato": dato}
+                resultado["revision_documento"] = revision_documento
+        except BaseException as exc:
+            # R15.6 (ALTO-02): compensación VERIFICADA por el coordinador;
+            # si la restauración también falla, registra la inconsistencia de
+            # forma durable (nunca un doble fallo silencioso) y bloquea el
+            # recurso hasta su resolución.
+            try:
+                tx.fallar(exc)
+            except HTTPException:
+                raise
+            except ValueError as vexc:
+                raise HTTPException(400, str(vexc)) from vexc
+            except Exception:  # noqa: BLE001 — fallo de almacén, compensado
+                raise HTTPException(503, (
+                    "No se pudo completar 'corrección de lectura' "
+                    f"({type(exc).__name__}: {exc}). Los efectos externos "
+                    "fueron restaurados; la solicitud no produjo efectos "
+                    "persistentes.")) from exc
+        tx.exito()
+
     muestra_confirmada = resultado.get("muestra_visual") if isinstance(resultado, dict) else None
     programador_auto = globals().get("_programar_entrenamiento_visual_auto")
     if (isinstance(muestra_confirmada, dict) and muestra_confirmada.get("entrenable")
             and callable(programador_auto)):
-        resultado["aprendizaje_visual_automatico"] = programador_auto(
+        # R15.6 (política HIGH-01 de R15.5): aprendizaje = efecto opcional
+        # post-commit; su fallo jamás revierte la confirmación humana.
+        _aprendizaje_opcional(
+            resultado, programador_auto,
             f"Supervisión confirmada: {solicitud.prueba_id}/{solicitud.imagen_id or solicitud.campo}")
     _regenerar_excel(resultado)
     resultado["estado"] = gestor.estado()
@@ -2817,10 +3803,14 @@ def anotar_region_no_detectada(solicitud: SolicitudAnotacionRegion):
     if (x < 0 or y < 0 or ancho < 2 or alto < 2 or
             x + ancho > ancho_imagen or y + alto > alto_imagen):
         raise HTTPException(400, "La región seleccionada queda fuera de la imagen.")
-    try:
-        poligono = (_validar_poligono_recorte(solicitud.poligono, [ancho_imagen, alto_imagen]).tolist()
-                    if solicitud.poligono is not None else None)
-        resultado = gestor.registrar_region(
+    poligono = (_validar_poligono_recorte(solicitud.poligono, [ancho_imagen, alto_imagen]).tolist()
+                if solicitud.poligono is not None else None)
+
+    # R15.6 (MEDIO-06): anotación + estado de revisión en una sola
+    # transacción; el entrenamiento automático queda DESPUÉS del éxito
+    # (efecto opcional tolerante a fallo, política HIGH-01 de R15.5).
+    def _efectos():
+        efecto = gestor.registrar_region(
             solicitud.texto_correcto, solicitud.bbox, poligono=poligono,
             ruta_imagen=str(ruta_local), carpeta_id=_id_fila(fila),
             carpeta_nombre=fila.get("nombre"),
@@ -2833,11 +3823,16 @@ def anotar_region_no_detectada(solicitud: SolicitudAnotacionRegion):
             metadatos={**{k: fila.get(k) for k in
                        ("tipo_st", "module_version", "temperature_condition", "inflator_type")},
                        "giro_foto": float((item.get("resultado_ocr") or {}).get("orientacion_texto_grados") or 0)})
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    gestor.actualizar_revision("carpeta", solicitud.prueba_id, estado="parcial")
+        gestor.actualizar_revision("carpeta", solicitud.prueba_id,
+                                   estado="parcial")
+        return efecto
+
+    resultado = _transaccion_efecto_humano(
+        "anotación de región manual", gestor, "carpeta", solicitud.prueba_id,
+        _efectos, recurso=str(ruta_local), ruta_imagen=ruta_local)
     if resultado.get("muestra_visual"):
-        resultado["aprendizaje_visual_automatico"] = _programar_entrenamiento_visual_auto(
+        _aprendizaje_opcional(
+            resultado, _programar_entrenamiento_visual_auto,
             f"Región manual confirmada: {solicitud.prueba_id}/{solicitud.imagen_id}")
     _regenerar_excel(resultado)
     resultado["estado"] = gestor.estado()
@@ -2854,7 +3849,20 @@ def rollback_aprendizaje(solicitud: SolicitudRollback):
 
 @app.post("/api/aprendizaje/rotaciones")
 def guardar_rotacion(solicitud: SolicitudRotacion):
+    """R15.6 (ALTO-04): la rotación externa corre bajo el lock por ruta del
+    documento externo (lectura fresca → patch → commit verificado)."""
+    if solicitud.tipo != "carpeta":
+        from pruebas_externas import rutas
+        _, salida = rutas(CONFIG)
+        with _pdoc.lock_documento(salida):
+            return _guardar_rotacion_impl(solicitud)
+    return _guardar_rotacion_impl(solicitud)
+
+
+def _guardar_rotacion_impl(solicitud: SolicitudRotacion):
     """Memoriza la orientación humana; el siguiente OCR la usa como punto de partida."""
+    if solicitud.tipo == "carpeta":
+        _assert_documento_editable("rotar la imagen")
     gestor = GestorAprendizaje(CONFIG)
     ocr_objetivo = None
     documento_externo = None
@@ -2880,6 +3888,9 @@ def guardar_rotacion(solicitud: SolicitudRotacion):
     else:
         from pruebas_externas import cargar, rutas
         documento_externo = cargar(CONFIG)
+        # R15.6 (ALTO-04): CAS sobre la lectura fresca (bajo lock por ruta).
+        _verificar_expected_revision(solicitud.expected_revision,
+                                     documento_externo)
         fila = next((f for f in documento_externo.get("resultados", [])
                      if f.get("id") == solicitud.prueba_id), None)
         if fila is None:
@@ -2896,43 +3907,121 @@ def guardar_rotacion(solicitud: SolicitudRotacion):
             raise HTTPException(404, "La imagen compleja ya no está disponible.")
         ocr_objetivo = fila
         _, salida_externa = rutas(CONFIG)
+    # R15.5 (HIGH-02): transacción única — snapshot del almacén de
+    # aprendizaje, efectos externos (rotación + evidencias + estado de
+    # revisión) y commit del documento AL FINAL; cualquier fallo ⇒
+    # restauración verificada (coordinador P0); doble fallo ⇒ inconsistencia
+    # explícita y bloqueo del recurso.
+    _assert_recurso_consistente(str(ruta), "rotar la imagen")
+    tx = TransaccionMultiAlmacen("rotación de imagen", recurso=str(ruta))
+
+    def _aplicar_almacen(giro: dict) -> dict:
+        efecto = (gestor.eliminar_rotacion(ruta) if solicitud.usar_automatico
+                  else gestor.actualizar_rotacion(ruta, solicitud.grados))
+        efecto.update(gestor.rotar_evidencias_imagen(
+            ruta, giro["delta"], giro["dimensiones_anteriores"],
+            grados_desde=giro["angulo_anterior"], grados_hasta=giro["angulo_nuevo"],
+            dimensiones_fuente=giro["dimensiones_fuente"]))
+        gestor.actualizar_revision(solicitud.tipo, solicitud.prueba_id,
+                                   estado="parcial")
+        return efecto
+
     try:
         if gestor.filtrar_no_texto(ocr_objetivo, ruta).get("ediciones_zona"):
             raise HTTPException(409, "Deshaz las uniones de esta imagen antes de cambiar su giro guardado. El zoom y el giro de vista siguen disponibles.")
         dimensiones_respaldo = _dimensiones_ocr_desde_archivo(ruta, ocr_objetivo)
-        giro = _rotar_resultado_existente(
-            ocr_objetivo, solicitud.grados, dimensiones_respaldo,
-            restaurar_automatico=solicitud.usar_automatico)
-        # Los recortes guardados pertenecen al marco anterior. No mostrar ni
-        # entrenar con polígonos regionales obsoletos tras girar toda la foto.
-        ocr_objetivo["recortes"] = []
-        for unidad in [*(ocr_objetivo.get("tokens") or []), *(ocr_objetivo.get("lineas_texto") or [])]:
-            unidad.pop("poligono_lectura", None)
-            unidad.pop("marco_region", None)
-        resultado = (gestor.eliminar_rotacion(ruta) if solicitud.usar_automatico
-                     else gestor.actualizar_rotacion(ruta, solicitud.grados))
-        resultado.update(gestor.rotar_evidencias_imagen(
-            ruta, giro["delta"], giro["dimensiones_anteriores"],
-            grados_desde=giro["angulo_anterior"], grados_hasta=giro["angulo_nuevo"],
-            dimensiones_fuente=giro["dimensiones_fuente"]))
+
+        def _limpiar_geometria(ocr_rotado: dict) -> None:
+            # Los recortes guardados pertenecen al marco anterior. No mostrar
+            # ni entrenar con polígonos regionales obsoletos tras girar la foto.
+            ocr_rotado["recortes"] = []
+            for unidad in [*(ocr_rotado.get("tokens") or []), *(ocr_rotado.get("lineas_texto") or [])]:
+                unidad.pop("poligono_lectura", None)
+                unidad.pop("marco_region", None)
+
         if solicitud.tipo == "carpeta":
-            # Etiqueta/referencia son vistas resumidas de las mismas imágenes.
-            for campo in ("etiqueta", "referencia"):
-                copia = fila.get(campo)
-                if (copia and str(copia.get("ruta")) == str(item.get("ruta")) and
-                        copia.get("resultado_ocr") is not ocr_objetivo):
-                    ocr_copia = copia.get("resultado_ocr") or {}
-                    _rotar_resultado_existente(
-                        ocr_copia, solicitud.grados,
-                        _dimensiones_ocr_desde_archivo(ruta, ocr_copia),
-                        restaurar_automatico=solicitud.usar_automatico)
-            _guardar_json_atomico(RUTA_VALIDACION, datos)
-            _cache.update({"mtime": None, "datos": None})
+            # R15.1 (CRÍTICO-01): el giro se calcula sobre el documento FRESCO
+            # bajo lock (el documento es la fuente de verdad del delta).
+            # R15.5 (HIGH-02): el COMMIT se hace al final, después de los
+            # efectos externos compensables.
+            def _rotar_en_fresco(frescos: dict):
+                fila_f = next((f for f in frescos.get("resultados", [])
+                               if _id_fila(f) == solicitud.prueba_id), None)
+                if fila_f is None:
+                    raise HTTPException(404, "La carpeta indicada no existe.")
+                item_f = next((imagen for imagen in fila_f.get("imagenes", [])
+                               if imagen.get("id") == solicitud.imagen_id), None)
+                if item_f is None:
+                    raise HTTPException(404, "La imagen indicada no pertenece a la carpeta.")
+                ocr_f = item_f.get("resultado_ocr") or {}
+                giro_f = _rotar_resultado_existente(
+                    ocr_f, solicitud.grados, dimensiones_respaldo,
+                    restaurar_automatico=solicitud.usar_automatico)
+                _limpiar_geometria(ocr_f)
+                # Etiqueta/referencia son vistas resumidas de las mismas imágenes.
+                for campo in ("etiqueta", "referencia"):
+                    copia = fila_f.get(campo)
+                    if (copia and str(copia.get("ruta")) == str(item_f.get("ruta")) and
+                            copia.get("resultado_ocr") is not ocr_f):
+                        ocr_copia = copia.get("resultado_ocr") or {}
+                        _rotar_resultado_existente(
+                            ocr_copia, solicitud.grados,
+                            _dimensiones_ocr_desde_archivo(ruta, ocr_copia),
+                            restaurar_automatico=solicitud.usar_automatico)
+                return giro_f
+
+            try:
+                with _lock_documento():
+                    datos_frescos = _leer_documento_disco()
+                    _verificar_expected_revision(solicitud.expected_revision,
+                                                 datos_frescos, estricto=True)
+                    giro = _rotar_en_fresco(datos_frescos)
+                    _, resultado = tx.aplicar(
+                        "rotación, evidencias y revisión",
+                        lambda: gestor.snapshot_evidencias_imagen(
+                            ruta, solicitud.prueba_id),
+                        lambda: _aplicar_almacen(giro),
+                        gestor.restaurar_evidencias_imagen)
+                    revision_documento = _commit_documento(datos_frescos)
+            except BaseException as exc:
+                try:
+                    tx.fallar(exc)
+                except HTTPException:
+                    raise
+                except Exception:  # noqa: BLE001 — fallo del almacén, compensado
+                    raise HTTPException(503, (
+                        "No se pudo actualizar el almacén de rotaciones/"
+                        f"evidencias ({type(exc).__name__}: {exc}). Los efectos "
+                        "externos fueron restaurados; la solicitud no produjo "
+                        "efectos persistentes.")) from exc
+            resultado["revision_documento"] = revision_documento
         else:
-            _guardar_json_atomico(salida_externa, documento_externo)
+            giro = _rotar_resultado_existente(
+                ocr_objetivo, solicitud.grados, dimensiones_respaldo,
+                restaurar_automatico=solicitud.usar_automatico)
+            _limpiar_geometria(ocr_objetivo)
+            try:
+                _, resultado = tx.aplicar(
+                    "rotación, evidencias y revisión",
+                    lambda: gestor.snapshot_evidencias_imagen(
+                        ruta, solicitud.prueba_id, tipo_revision="externa"),
+                    lambda: _aplicar_almacen(giro),
+                    gestor.restaurar_evidencias_imagen)
+                _commit_documento_externo(salida_externa, documento_externo)
+            except BaseException as exc:
+                try:
+                    tx.fallar(exc)
+                except HTTPException:
+                    raise
+                except Exception:  # noqa: BLE001 — fallo de almacén/JSON, compensado
+                    raise HTTPException(503, (
+                        "No se pudo completar la rotación en la prueba externa "
+                        f"({type(exc).__name__}: {exc}). Los efectos externos "
+                        "fueron restaurados; la solicitud no produjo efectos "
+                        "persistentes.")) from exc
+        tx.exito()
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    gestor.actualizar_revision(solicitud.tipo, solicitud.prueba_id, estado="parcial")
     resultado["mensaje"] = ((
         "Se restauró la orientación automática y se ajustaron sus cajas y regiones.")
         if solicitud.usar_automatico else (
@@ -2943,7 +4032,20 @@ def guardar_rotacion(solicitud: SolicitudRotacion):
 
 @app.post("/api/imagenes/sin-datos")
 def marcar_imagen_sin_datos(solicitud: SolicitudImagenSinDatos):
+    """R15.6 (ALTO-04): la marca externa corre bajo el lock por ruta del
+    documento externo (lectura fresca → patch → commit verificado)."""
+    if solicitud.tipo != "carpeta":
+        from pruebas_externas import rutas
+        _, salida = rutas(CONFIG)
+        with _pdoc.lock_documento(salida):
+            return _marcar_imagen_sin_datos_impl(solicitud)
+    return _marcar_imagen_sin_datos_impl(solicitud)
+
+
+def _marcar_imagen_sin_datos_impl(solicitud: SolicitudImagenSinDatos):
     """Registra una decisión humana válida; no la presenta como error OCR."""
+    if solicitud.tipo == "carpeta":
+        _assert_documento_editable("marcar la imagen sin datos")
     gestor = GestorAprendizaje(CONFIG)
     if solicitud.tipo == "carpeta":
         datos = _cargar_datos()
@@ -2959,34 +4061,113 @@ def marcar_imagen_sin_datos(solicitud: SolicitudImagenSinDatos):
         if raiz is None:
             raise HTTPException(503, "La raíz de imágenes no está disponible en este equipo.")
         ruta = _resolver_imagen(str(item["ruta"]), datos, raiz)
-        resultado = gestor.registrar_imagen_sin_datos(
-            ruta, solicitud.prueba_id, solicitud.motivo, solicitud.usuario)
-        item["estado_imagen"] = "revisada_sin_datos"
-        item["revision_sin_datos"] = resultado
-        if item.get("resultado_ocr") is not None:
-            item["resultado_ocr"]["estado_imagen"] = "revisada_sin_datos"
-        for traza in fila.get("trazabilidad", []):
-            if str(traza.get("ruta_absoluta")) == str(ruta):
-                traza.update({"estado_imagen": "revisada_sin_datos",
-                              "requiere_revision": False,
-                              "mensaje_error": solicitud.motivo or None})
-        _guardar_json_atomico(RUTA_VALIDACION, datos)
-        _cache.update({"mtime": None, "datos": None})
+
+        # R15.1 (CRÍTICO-01): patch sobre el documento fresco, bajo lock.
+        def _marcar_en_fresco(frescos: dict):
+            fila_f = next((f for f in frescos.get("resultados", [])
+                           if _id_fila(f) == solicitud.prueba_id), None)
+            if fila_f is None:
+                raise HTTPException(404, "La carpeta indicada no existe.")
+            item_f = next((imagen for imagen in fila_f.get("imagenes", [])
+                           if imagen.get("id") == solicitud.imagen_id), None)
+            if item_f is None:
+                raise HTTPException(404, "La imagen indicada no pertenece a la carpeta.")
+            item_f["estado_imagen"] = "revisada_sin_datos"
+            item_f["revision_sin_datos"] = resultado
+            if item_f.get("resultado_ocr") is not None:
+                item_f["resultado_ocr"]["estado_imagen"] = "revisada_sin_datos"
+            for traza in fila_f.get("trazabilidad", []):
+                if str(traza.get("ruta_absoluta")) == str(ruta):
+                    traza.update({"estado_imagen": "revisada_sin_datos",
+                                  "requiere_revision": False,
+                                  "mensaje_error": solicitud.motivo or None})
+
+        # R15.3 (ALTO-02): CAS autoritativo, efecto durable (SQLite) y commit
+        # en la MISMA región de exclusión del documento. El prechequeo ya no
+        # es una garantía aparte: mientras se sostiene el lock ningún otro
+        # escritor puede mover la revisión, así que un 409 sólo puede ocurrir
+        # ANTES del registro (cero efectos persistentes de una petición
+        # rechazada) y el commit final no puede encontrar un conflicto nuevo.
+        # R15.5 (MEDIUM-04): política uniforme — marca sin-datos y estado de
+        # revisión son efectos compensables ANTES del commit documental,
+        # coordinados por TransaccionMultiAlmacen (restauración VERIFICADA;
+        # doble fallo ⇒ inconsistencia explícita + bloqueo del recurso).
+        _assert_recurso_consistente(str(ruta), "marcar la imagen sin datos")
+        tx = TransaccionMultiAlmacen("marcar imagen sin datos", recurso=str(ruta))
+        with _lock_documento():
+            _prechequeo_cas_documento(solicitud.expected_revision)
+            try:
+                tx.capturar("marca sin-datos",
+                            lambda: gestor.imagen_sin_datos(ruta),
+                            lambda estado: _restaurar_marca_sin_datos(
+                                gestor, ruta, estado))
+                resultado = gestor.registrar_imagen_sin_datos(
+                    ruta, solicitud.prueba_id, solicitud.motivo,
+                    solicitud.usuario)
+                tx.aplicado()
+                tx.capturar("estado de revisión",
+                            lambda: _capturar_revision_estado(
+                                gestor, "carpeta", solicitud.prueba_id),
+                            lambda estado: _restaurar_revision_estado(
+                                gestor, "carpeta", solicitud.prueba_id, estado))
+                gestor.actualizar_revision(solicitud.tipo, solicitud.prueba_id,
+                                           estado="parcial")
+                tx.aplicado()
+                resultado["revision_documento"] = mutar_documento(
+                    _marcar_en_fresco, solicitud.expected_revision, estricto=True)[0]
+            except BaseException as exc:
+                tx.fallar(exc)
+            tx.exito()
     else:
         from pruebas_externas import cargar, rutas
         documento = cargar(CONFIG)
+        # R15.6 (ALTO-04): CAS sobre la lectura fresca (bajo lock por ruta).
+        _verificar_expected_revision(solicitud.expected_revision, documento)
         fila = next((f for f in documento.get("resultados", [])
                      if f.get("id") == solicitud.prueba_id), None)
         if fila is None:
             raise HTTPException(404, "La prueba externa indicada no existe.")
         ruta = Path(str(fila.get("ruta") or "")).resolve()
-        resultado = gestor.registrar_imagen_sin_datos(
-            ruta, solicitud.prueba_id, solicitud.motivo, solicitud.usuario)
-        fila["estado_imagen"] = "revisada_sin_datos"
-        fila["revision_sin_datos"] = resultado
-        _, salida = rutas(CONFIG)
-        _guardar_json_atomico(salida, documento)
-    gestor.actualizar_revision(solicitud.tipo, solicitud.prueba_id, estado="parcial")
+        # R15.5 (MEDIUM-04): la rama externa comparte la MISMA política: la
+        # marca SQLite y el estado de revisión son efectos compensables y el
+        # JSON externo es el commit final; si falla, restauración verificada
+        # (antes la marca sobrevivía al fallo de escritura del JSON).
+        _assert_recurso_consistente(str(ruta), "marcar la imagen sin datos")
+        tx = TransaccionMultiAlmacen("marcar imagen sin datos (externa)",
+                                     recurso=str(ruta))
+        try:
+            tx.capturar("marca sin-datos",
+                        lambda: gestor.imagen_sin_datos(ruta),
+                        lambda estado: _restaurar_marca_sin_datos(
+                            gestor, ruta, estado))
+            resultado = gestor.registrar_imagen_sin_datos(
+                ruta, solicitud.prueba_id, solicitud.motivo, solicitud.usuario)
+            tx.aplicado()
+            tx.capturar("estado de revisión",
+                        lambda: _capturar_revision_estado(
+                            gestor, "externa", solicitud.prueba_id),
+                        lambda estado: _restaurar_revision_estado(
+                            gestor, "externa", solicitud.prueba_id, estado))
+            gestor.actualizar_revision(solicitud.tipo, solicitud.prueba_id,
+                                       estado="parcial")
+            tx.aplicado()
+            fila["estado_imagen"] = "revisada_sin_datos"
+            fila["revision_sin_datos"] = resultado
+            _, salida = rutas(CONFIG)
+            resultado["revision_documento_externo"] = _commit_documento_externo(
+                salida, documento)
+        except BaseException as exc:
+            try:
+                tx.fallar(exc)
+            except HTTPException:
+                raise
+            except Exception:  # noqa: BLE001 — fallo de almacén, compensado
+                raise HTTPException(503, (
+                    "No se pudo completar la marca sin-datos en la prueba "
+                    f"externa ({type(exc).__name__}: {exc}). Los efectos "
+                    "externos fueron restaurados; la solicitud no produjo "
+                    "efectos persistentes.")) from exc
+        tx.exito()
     resultado["mensaje"] = "Imagen revisada y registrada sin datos de texto útiles."
     return resultado
 
@@ -3005,8 +4186,23 @@ def _restaurar_estado_con_texto(item: dict) -> None:
 
 @app.post("/api/imagenes/con-texto")
 def restaurar_imagen_con_texto(solicitud: SolicitudImagenSinDatos):
-    if _pipeline_hilo is not None and _pipeline_hilo.is_alive():
-        raise HTTPException(409, "Detén conservando el avance antes de restaurar la imagen.")
+    """R15.6 (ALTO-04): la restauración externa corre bajo el lock por ruta
+    del documento externo (lectura fresca → patch → commit verificado)."""
+    if solicitud.tipo != "carpeta":
+        from pruebas_externas import rutas
+        _, salida = rutas(CONFIG)
+        with _pdoc.lock_documento(salida):
+            return _restaurar_imagen_con_texto_impl(solicitud)
+    return _restaurar_imagen_con_texto_impl(solicitud)
+
+
+def _restaurar_imagen_con_texto_impl(solicitud: SolicitudImagenSinDatos):
+    # R15.3 (ALTO-03): guarda UNIFORME de pipeline. En R15.2 esta ruta sólo
+    # miraba el hilo vivo e ignoraba _pipeline_reserva: durante la ventana
+    # entre admisión y arranque del worker aceptaba restauraciones que el
+    # pipeline estaba a punto de procesar.
+    if solicitud.tipo == "carpeta":
+        _assert_documento_editable("restaurar la imagen")
     gestor = GestorAprendizaje(CONFIG)
     if solicitud.tipo == "carpeta":
         datos = deepcopy(_cargar_datos())
@@ -3020,17 +4216,72 @@ def restaurar_imagen_con_texto(solicitud: SolicitudImagenSinDatos):
         if raiz is None:
             raise HTTPException(503, "La raíz de imágenes no está disponible.")
         ruta = _resolver_imagen(str(item["ruta"]), datos, raiz)
-        _restaurar_estado_con_texto(item)
-        for alias in (fila.get("etiqueta"), fila.get("referencia")):
-            if alias and str(alias.get("ruta")) == str(item["ruta"]):
-                _restaurar_estado_con_texto(alias)
-        for traza in fila.get("trazabilidad", []):
-            if str(traza.get("ruta_absoluta")) in {str(ruta), str(item["ruta"])}:
-                traza.update(estado_imagen="pendiente", requiere_revision=True, mensaje_error=None)
-        destino = RUTA_VALIDACION
+
+        # Garantía V15.9.3 preservada bajo R15.1: si la escritura JSON falla,
+        # la marca persistida NO se elimina. El DELETE queda preparado dentro
+        # de una transacción sqlite abierta y sólo se confirma (con.commit)
+        # después de que ``mutar_documento`` persista el documento con éxito.
+        # R15.5 (MEDIUM-04): el estado de revisión es efecto compensable
+        # aplicado ANTES del commit, con la misma política transversal.
+        _assert_recurso_consistente(str(ruta), "restaurar la imagen")
+        tx = TransaccionMultiAlmacen("restaurar imagen con texto",
+                                     recurso=str(ruta))
+        try:
+            tx.capturar("estado de revisión",
+                        lambda: _capturar_revision_estado(
+                            gestor, "carpeta", solicitud.prueba_id),
+                        lambda estado: _restaurar_revision_estado(
+                            gestor, "carpeta", solicitud.prueba_id, estado))
+            gestor.actualizar_revision(solicitud.tipo, solicitud.prueba_id,
+                                       estado="parcial")
+            tx.aplicado()
+        except BaseException as exc:
+            try:
+                tx.fallar(exc)
+            except HTTPException:
+                raise
+            except Exception:  # noqa: BLE001 — fallo de almacén, compensado
+                raise HTTPException(503, (
+                    "No se pudo actualizar el estado de revisión "
+                    f"({type(exc).__name__}: {exc}). La solicitud no produjo "
+                    "efectos persistentes.")) from exc
+        con = gestor._conectar()
+        try:
+            def _restaurar_en_fresco(frescos: dict):
+                fila_f = next((f for f in frescos.get("resultados", [])
+                               if _id_fila(f) == solicitud.prueba_id), None)
+                if fila_f is None:
+                    raise HTTPException(404, "Carpeta no encontrada.")
+                item_f = next((i for i in fila_f.get("imagenes", [])
+                               if i.get("id") == solicitud.imagen_id), None)
+                if item_f is None:
+                    raise HTTPException(404, "Imagen no encontrada en esta carpeta.")
+                con.execute("DELETE FROM imagenes_sin_datos WHERE imagen_hash=?",
+                            (hash_archivo(ruta),))
+                _restaurar_estado_con_texto(item_f)
+                for alias in (fila_f.get("etiqueta"), fila_f.get("referencia")):
+                    if alias and str(alias.get("ruta")) == str(item_f["ruta"]):
+                        _restaurar_estado_con_texto(alias)
+                for traza in fila_f.get("trazabilidad", []):
+                    if str(traza.get("ruta_absoluta")) in {str(ruta), str(item_f["ruta"])}:
+                        traza.update(estado_imagen="pendiente", requiere_revision=True,
+                                     mensaje_error=None)
+
+            resultado = {"restaurada": True, "estado_imagen": "pendiente"}
+            resultado["revision_documento"] = mutar_documento(
+                _restaurar_en_fresco, solicitud.expected_revision, estricto=True)[0]
+            con.commit()
+        except BaseException as exc:
+            con.rollback()
+            tx.fallar(exc)  # compensa el estado de revisión ya aplicado
+        finally:
+            con.close()
+        tx.exito()
     else:
         from pruebas_externas import cargar, rutas
         datos = deepcopy(cargar(CONFIG))
+        # R15.6 (ALTO-04): CAS sobre la lectura fresca (bajo lock por ruta).
+        _verificar_expected_revision(solicitud.expected_revision, datos)
         item = next((f for f in datos.get("resultados", []) if f.get("id") == solicitud.prueba_id), None)
         if item is None:
             raise HTTPException(404, "Prueba externa no encontrada.")
@@ -3039,14 +4290,38 @@ def restaurar_imagen_con_texto(solicitud: SolicitudImagenSinDatos):
             raise HTTPException(404, "La imagen ya no está disponible.")
         _restaurar_estado_con_texto(item)
         _, destino = rutas(CONFIG)
-    # Si falla la escritura JSON, la transacción no elimina la marca persistida.
-    with gestor._conectar() as con:
-        con.execute("DELETE FROM imagenes_sin_datos WHERE imagen_hash=?", (hash_archivo(ruta),))
-        _guardar_json_atomico(destino, datos)
-    _cache.update({"mtime": None, "datos": None})
-    gestor.actualizar_revision(solicitud.tipo, solicitud.prueba_id, estado="parcial")
-    resultado = {"restaurada": True, "estado_imagen": "pendiente",
-                 "mensaje": "Marca sin texto retirada. La imagen queda pendiente de revisión. Si no tiene lecturas, reprocesa esta imagen."}
+        # Si falla la escritura JSON, la transacción no elimina la marca persistida.
+        # R15.5 (MEDIUM-04): estado de revisión compensable antes del commit.
+        _assert_recurso_consistente(str(ruta), "restaurar la imagen")
+        tx = TransaccionMultiAlmacen("restaurar imagen con texto (externa)",
+                                     recurso=str(ruta))
+        try:
+            tx.capturar("estado de revisión",
+                        lambda: _capturar_revision_estado(
+                            gestor, "externa", solicitud.prueba_id),
+                        lambda estado: _restaurar_revision_estado(
+                            gestor, "externa", solicitud.prueba_id, estado))
+            gestor.actualizar_revision(solicitud.tipo, solicitud.prueba_id,
+                                       estado="parcial")
+            tx.aplicado()
+            with gestor._conectar() as con:
+                con.execute("DELETE FROM imagenes_sin_datos WHERE imagen_hash=?", (hash_archivo(ruta),))
+                _commit_documento_externo(destino, datos)
+        except BaseException as exc:
+            try:
+                tx.fallar(exc)
+            except HTTPException:
+                raise
+            except Exception:  # noqa: BLE001 — fallo de almacén/JSON, compensado
+                raise HTTPException(503, (
+                    "No se pudo restaurar la imagen en la prueba externa "
+                    f"({type(exc).__name__}: {exc}). Los efectos externos "
+                    "fueron restaurados; la solicitud no produjo efectos "
+                    "persistentes.")) from exc
+        tx.exito()
+        resultado = {"restaurada": True, "estado_imagen": "pendiente"}
+    resultado["mensaje"] = ("Marca sin texto retirada. La imagen queda pendiente de revisión. "
+                            "Si no tiene lecturas, reprocesa esta imagen.")
     _regenerar_excel(resultado)
     return resultado
 
@@ -3054,6 +4329,7 @@ def restaurar_imagen_con_texto(solicitud: SolicitudImagenSinDatos):
 @app.post("/api/imagenes/verificar")
 def verificar_imagen(solicitud: SolicitudImagenVerificada):
     """Confirma que una imagen con texto ya fue revisada por una persona."""
+    _assert_documento_editable("verificar la imagen")
     datos = _cargar_datos()
     fila = next((f for f in (datos or {}).get("resultados", [])
                  if _id_fila(f) == solicitud.prueba_id), None)
@@ -3067,17 +4343,63 @@ def verificar_imagen(solicitud: SolicitudImagenVerificada):
         raise HTTPException(409, "Esta imagen ya fue confirmada sin texto.")
     ahora = datetime.now().isoformat(timespec="seconds")
     revision = {"estado": "verificada", "usuario": solicitud.usuario, "fecha": ahora}
-    item["estado_imagen"] = "verificada"
-    item["revision_imagen"] = revision
-    if item.get("resultado_ocr") is not None:
-        item["resultado_ocr"]["estado_imagen"] = "verificada"
-    for traza in fila.get("trazabilidad", []):
-        if str(traza.get("ruta_absoluta")) == str(item.get("ruta")):
-            traza.update({"estado_imagen": "verificada", "requiere_revision": False})
-    _guardar_json_atomico(RUTA_VALIDACION, datos)
-    _cache.update({"mtime": None, "datos": None})
+
+    # R15.1 (CRÍTICO-01): patch sobre el documento fresco, bajo lock.
+    def _verificar_en_fresco(frescos: dict):
+        fila_f = next((f for f in frescos.get("resultados", [])
+                       if _id_fila(f) == solicitud.prueba_id), None)
+        if fila_f is None:
+            raise HTTPException(404, "La carpeta indicada no existe.")
+        item_f = next((imagen for imagen in fila_f.get("imagenes", [])
+                       if imagen.get("id") == solicitud.imagen_id), None)
+        if item_f is None:
+            raise HTTPException(404, "La imagen indicada no pertenece a la carpeta.")
+        if item_f.get("revision_sin_datos") or item_f.get("estado_imagen") == "revisada_sin_datos":
+            raise HTTPException(409, "Esta imagen ya fue confirmada sin texto.")
+        item_f["estado_imagen"] = "verificada"
+        item_f["revision_imagen"] = revision
+        if item_f.get("resultado_ocr") is not None:
+            item_f["resultado_ocr"]["estado_imagen"] = "verificada"
+        for traza in fila_f.get("trazabilidad", []):
+            if str(traza.get("ruta_absoluta")) == str(item_f.get("ruta")):
+                traza.update({"estado_imagen": "verificada", "requiere_revision": False})
+
+    # R15.5 (HIGH-03): transacción única — el estado de revisión es un efecto
+    # externo compensable que se aplica ANTES del commit documental; si algo
+    # falla ⇒ restauración verificada (coordinador P0), nunca un documento
+    # confirmado con el estado de revisión humano pendiente.
     gestor = GestorAprendizaje(CONFIG)
-    gestor.actualizar_revision("carpeta", solicitud.prueba_id, estado="parcial")
+    try:
+        raiz_recurso = _resolver_raiz_datos(datos)
+        recurso = (str(_resolver_imagen(str(item.get("ruta") or ""), datos, raiz_recurso))
+                   if raiz_recurso is not None
+                   else f"carpeta:{solicitud.prueba_id}")
+    except (OSError, ValueError):
+        recurso = f"carpeta:{solicitud.prueba_id}"
+    _assert_recurso_consistente(recurso, "verificar la imagen")
+    tx = TransaccionMultiAlmacen("verificación de imagen", recurso=recurso)
+    try:
+        tx.capturar("estado de revisión",
+                    lambda: _capturar_revision_estado(
+                        gestor, "carpeta", solicitud.prueba_id),
+                    lambda estado: _restaurar_revision_estado(
+                        gestor, "carpeta", solicitud.prueba_id, estado))
+        gestor.actualizar_revision("carpeta", solicitud.prueba_id, estado="parcial")
+        tx.aplicado()
+        revision_documento = mutar_documento(
+            _verificar_en_fresco, solicitud.expected_revision, estricto=True)[0]
+    except BaseException as exc:
+        try:
+            tx.fallar(exc)
+        except HTTPException:
+            raise
+        except Exception:  # noqa: BLE001 — fallo de almacén, compensado
+            raise HTTPException(503, (
+                "No se pudo actualizar el estado de revisión "
+                f"({type(exc).__name__}: {exc}). Los efectos externos fueron "
+                "restaurados; la solicitud no produjo efectos "
+                "persistentes.")) from exc
+    tx.exito()
     # V14.12: si esta imagen ya tenía uniones creadas en versiones anteriores,
     # incorporarlas ahora al dataset visual. Es una migración oportunista: no
     # recorremos miles de archivos al arrancar y la firma evita duplicados.
@@ -3106,6 +4428,7 @@ def verificar_imagen(solicitud: SolicitudImagenVerificada):
     mensaje_union = (f" Se incorporaron {nuevas_union} muestra(s) de uniones guardadas al entrenamiento."
                      if nuevas_union else "")
     return {"verificada": True, "revision_imagen": revision,
+            "revision_documento": revision_documento,
             "aprendizaje_visual_automatico": auto_visual,
             "uniones_historicas_entrenamiento": union_historica,
             "mensaje": "Imagen verificada y marcada en verde." + mensaje_union +
@@ -3203,6 +4526,13 @@ def evaluar_pruebas_externas():
 
 @app.post("/api/revisiones")
 def actualizar_revision(solicitud: SolicitudRevision):
+    # R15.6 (ALTO-10): cerrar la revisión humana como «completada» exige que
+    # el caso no pueda estar siendo modificado: sin pipeline activo/reservado
+    # y sin reanálisis de videos en curso. El resto de transiciones conserva
+    # el comportamiento heredado.
+    if solicitud.tipo == "carpeta" and solicitud.estado == "completada":
+        _assert_pipeline_inactivo("cerrar la revisión como completada",
+                                  incluir_reanalisis=True)
     gestor = GestorAprendizaje(CONFIG)
     estado_inicial = "por_revisar"
     if solicitud.tipo == "carpeta":
@@ -3292,22 +4622,29 @@ def corregir_prueba_externa(solicitud: SolicitudCorreccionExterna):
     if token is None:
         raise HTTPException(
             400, "La lectura OCR no coincide de forma única; vuelve a seleccionarla.")
-    try:
-        texto_actual = str(token.get("texto") or solicitud.texto_ocr)
-        texto_original = str(token.get("texto_original") or texto_actual)
-        correcto = texto_actual if solicitud.accion == "aceptar" else solicitud.texto_correcto
-        estado_supervision = ("aceptado_provisional" if solicitud.accion == "aceptar"
-                              else "corregido_humano" if solicitud.accion in {
-                                  "corregir", "guardar_sin_entrenar", "confirmar_entrenar"}
-                              else solicitud.accion)
-        metadatos_supervision = {
-            "origen": "externa", "fuente_supervision": "aceptar_ocr"
-                if solicitud.accion == "aceptar" else "dashboard_externo",
-            "texto_ocr_original": texto_original,
-            "texto_lectura_previa": texto_actual,
-            "estado_supervision": estado_supervision,
-            "bbox_original": token.get("bbox"),
-        }
+    texto_actual = str(token.get("texto") or solicitud.texto_ocr)
+    texto_original = str(token.get("texto_original") or texto_actual)
+    correcto = texto_actual if solicitud.accion == "aceptar" else solicitud.texto_correcto
+    estado_supervision = ("aceptado_provisional" if solicitud.accion == "aceptar"
+                          else "corregido_humano" if solicitud.accion in {
+                              "corregir", "guardar_sin_entrenar", "confirmar_entrenar"}
+                          else solicitud.accion)
+    metadatos_supervision = {
+        "origen": "externa", "fuente_supervision": "aceptar_ocr"
+            if solicitud.accion == "aceptar" else "dashboard_externo",
+        "texto_ocr_original": texto_original,
+        "texto_lectura_previa": texto_actual,
+        "estado_supervision": estado_supervision,
+        "bbox_original": token.get("bbox"),
+    }
+    if solicitud.accion not in {"ilegible", "no_es_campo"} and not correcto.strip():
+        raise HTTPException(400, "Escribe el texto correcto antes de confirmar.")
+
+    # R15.6 (MEDIO-06): supervisión externa + estado de revisión en una sola
+    # transacción compensable (snapshot común de la imagen cuando existe).
+    ruta_efecto = Path(str(fila.get("ruta") or ""))
+
+    def _efectos():
         if solicitud.accion in {"ilegible", "no_es_campo"}:
             muestra = gestor.registrar_muestra_visual(
                 fila["ruta"], solicitud.prueba_id, texto_actual, correcto,
@@ -3315,12 +4652,10 @@ def corregir_prueba_externa(solicitud: SolicitudCorreccionExterna):
                 confianza=token.get("confianza"), modelo_origen=fila.get("modelo_visual_version")
                 or fila.get("motor"), usuario=solicitud.usuario,
                 metadatos=metadatos_supervision)
-            resultado = {"registrada": True, "tipo": "supervision_visual",
-                         "muestra_visual": muestra, "entrenamiento": None}
+            efecto = {"registrada": True, "tipo": "supervision_visual",
+                      "muestra_visual": muestra, "entrenamiento": None}
         else:
-            if not correcto.strip():
-                raise ValueError("Escribe el texto correcto antes de confirmar.")
-            resultado = gestor.registrar_correccion(
+            efecto = gestor.registrar_correccion(
                 texto_actual, correcto, ruta_imagen=fila["ruta"],
                 bbox=token.get("bbox"), fuente="dashboard_externo",
                 caso_id=solicitud.prueba_id, accion=solicitud.accion,
@@ -3328,16 +4663,22 @@ def corregir_prueba_externa(solicitud: SolicitudCorreccionExterna):
                 confianza=token.get("confianza"), modelo_origen=fila.get("modelo_visual_version")
                 or fila.get("motor"), usuario=solicitud.usuario,
                 metadatos=metadatos_supervision)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
+        gestor.actualizar_revision("externa", solicitud.prueba_id,
+                                   estado="parcial")
+        return efecto
+
+    resultado = _transaccion_efecto_humano(
+        "supervisión de prueba externa", gestor, "externa",
+        solicitud.prueba_id, _efectos, recurso=str(ruta_efecto),
+        ruta_imagen=(ruta_efecto if ruta_efecto.is_file() else None))
     if isinstance(resultado, dict):
         resultado.setdefault("estado_supervision", estado_supervision)
-    gestor.actualizar_revision("externa", solicitud.prueba_id, estado="parcial")
     muestra_confirmada = resultado.get("muestra_visual") if isinstance(resultado, dict) else None
     programador_auto = globals().get("_programar_entrenamiento_visual_auto")
     if (isinstance(muestra_confirmada, dict) and muestra_confirmada.get("entrenable")
             and callable(programador_auto)):
-        resultado["aprendizaje_visual_automatico"] = programador_auto(
+        _aprendizaje_opcional(
+            resultado, programador_auto,
             f"Supervisión externa confirmada: {solicitud.prueba_id}")
     _regenerar_excel(resultado)
     resultado["estado"] = gestor.estado()
@@ -3377,8 +4718,10 @@ def anotar_region_externa(solicitud: SolicitudRegionExterna):
     if (x < 0 or y < 0 or ancho < 2 or alto < 2 or
             x + ancho > ancho_imagen or y + alto > alto_imagen):
         raise HTTPException(400, "La región seleccionada queda fuera de la imagen.")
-    try:
-        resultado = gestor.registrar_region(
+    # R15.6 (MEDIO-06): región externa + estado de revisión en una sola
+    # transacción compensable; entrenamiento automático después del éxito.
+    def _efectos():
+        efecto = gestor.registrar_region(
             solicitud.texto_correcto, solicitud.bbox, ruta_imagen=str(ruta),
             carpeta_id=solicitud.prueba_id, carpeta_nombre="Pruebas complejas",
             imagen_nombre=fila.get("imagen"), fuente="dashboard_externo",
@@ -3386,11 +4729,16 @@ def anotar_region_externa(solicitud: SolicitudRegionExterna):
             usuario=solicitud.usuario,
             entrenable=True,
             metadatos={"origen": "externa"})
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    gestor.actualizar_revision("externa", solicitud.prueba_id, estado="parcial")
+        gestor.actualizar_revision("externa", solicitud.prueba_id,
+                                   estado="parcial")
+        return efecto
+
+    resultado = _transaccion_efecto_humano(
+        "anotación de región externa", gestor, "externa", solicitud.prueba_id,
+        _efectos, recurso=str(ruta), ruta_imagen=ruta)
     if resultado.get("muestra_visual"):
-        resultado["aprendizaje_visual_automatico"] = _programar_entrenamiento_visual_auto(
+        _aprendizaje_opcional(
+            resultado, _programar_entrenamiento_visual_auto,
             f"Región externa confirmada: {solicitud.prueba_id}")
     _regenerar_excel(resultado)
     resultado["estado"] = gestor.estado()
@@ -3445,7 +4793,7 @@ def _resolver_instantanea_para_ejecucion(ejecucion_id: str,
 
 @app.post("/api/pipeline", status_code=202)
 def iniciar_pipeline(solicitud: SolicitudPipeline):
-    global _pipeline_hilo
+    global _pipeline_hilo, _pipeline_reserva
     # R14: validar primero los criterios declarados. Esto evita hacer trabajo de
     # rutas/plantillas o devolver un error secundario cuando la solicitud ya es
     # inválida por sus límites de semáforo. No persiste nada.
@@ -3470,7 +4818,7 @@ def iniciar_pipeline(solicitud: SolicitudPipeline):
     if ruta == Path(ruta.anchor):
         raise HTTPException(400, "No se permite procesar la raíz completa del sistema.")
     if es_raiz_codigo_seleccionada(ruta, RAIZ_PROYECTO):
-        raise HTTPException(400, "Seleccionaste la propia carpeta de V-Matrix como lote. Elige la carpeta que contiene las pruebas, no la carpeta del programa.")
+        raise HTTPException(400, "Seleccionaste la carpeta de V-Matrix (o una carpeta que la contiene) como lote. Elige la carpeta específica que contiene las pruebas, no la carpeta del programa ni un padre que la incluya.")
     try:
         nombre_excel = validar_nombre_excel(solicitud.nombre_excel)
     except ValueError as exc:
@@ -3536,24 +4884,9 @@ def iniciar_pipeline(solicitud: SolicitudPipeline):
                     409, f"El checkpoint pertenece al proyecto «{previa.get('nombre_proyecto') or previa['project_id']}». "
                     f"Reanudar con «{nueva_pid}» exige una migración explícita "
                     "(con historial y respaldo); no se acepta en silencio.")
-        if not proyecto_declarado["sin_asignar"]:
-            try:
-                # P12: colisión de ID con nombre distinto ⇒ 409, sin fusión.
-                registro_proyectos.registrar_proyecto(
-                    proyecto_declarado["nombre_proyecto"]
-                    or proyecto_declarado["proyecto_id"],
-                    proyecto_id=proyecto_declarado["proyecto_id"],
-                    responsable=proyecto_declarado["usuario"])
-            except registro_proyectos.ColisionProyectoError as exc:
-                raise HTTPException(409, str(exc)) from exc
-            except ValueError as exc:
-                raise HTTPException(400, str(exc)) from exc
-            except registro_proyectos.RegistroProyectosCorruptoError as exc:
-                # CRIT-04: fallar cerrado ANTES de procesar; el registro no se
-                # toca (cero bytes modificados) y el error es visible.
-                raise HTTPException(503, f"Registro de proyectos ilegible: {exc}") from exc
-            except registro_proyectos.ErrorPersistenciaProyectos as exc:
-                raise HTTPException(503, f"El proyecto no se registró: {exc}") from exc
+        # R15 (MEDIA-15): el registro persistente del proyecto se trasladó
+        # DESPUÉS de la admisión atómica del slot (más abajo): una solicitud
+        # que será rechazada (409) no debe dejar efectos persistentes.
     identidad_proyecto = resolver_identidad_proyecto(
         declarado=proyecto_declarado, raiz=ruta,
         configurado=(CONFIG.get("empresarial") or {}).get("proyecto_id"))
@@ -3564,10 +4897,24 @@ def iniciar_pipeline(solicitud: SolicitudPipeline):
     if not capacidad["listo"]:
         raise HTTPException(503, {"mensaje": "El entorno OCR no está listo.", **capacidad})
 
-    with _pipeline_lock:
-        hilo_vivo = bool(_pipeline_hilo and _pipeline_hilo.is_alive())
-        if hilo_vivo:
+    with _pipeline_lock, _video_reanalisis_lock:
+        # R15 (CRIT-01): admisión ATÓMICA del único slot de worker. La reserva
+        # se adquiere en la misma sección crítica que cambia el estado; antes
+        # se comprobaba is_alive() y el hilo se asignaba después de persistir
+        # el checkpoint, dejando una ventana de doble arranque. Orden de locks
+        # pipeline→reanálisis, el mismo que /api/video/maximo (sin inversión).
+        if _pipeline_hilo is not None and _pipeline_hilo.is_alive():
+            # Mensaje V14 conservado: hilo anterior vivo cerrando recursos.
             raise HTTPException(409, "El procesamiento anterior todavía está cerrando recursos; vuelve a intentar cuando termine.")
+        if _pipeline_reserva is not None:
+            raise HTTPException(409, "Ya hay un procesamiento admitido (reserva en curso); vuelve a intentar cuando termine.")
+        if _video_reanalisis_hilo is not None and _video_reanalisis_hilo.is_alive():
+            raise HTTPException(409, "Hay un reanálisis de videos en curso; termínalo antes de iniciar un procesamiento.")
+        estado_anterior = deepcopy(_pipeline_estado)
+        ejecucion_id = str(solicitud.ejecucion_id or uuid.uuid4().hex)
+        _pipeline_reserva = {
+            "ejecucion_id": ejecucion_id, "origen": "pipeline",
+            "reservado_en": datetime.now().isoformat(timespec="milliseconds")}
         # Un estado cancelando/pausado persistido sin hilo vivo es un checkpoint,
         # no un proceso real. V14 permite iniciar de nuevo sin borrar cachés.
         if _pipeline_estado["estado"] == "reanudando" and (
@@ -3576,12 +4923,15 @@ def iniciar_pipeline(solicitud: SolicitudPipeline):
         _pipeline_continuar.set()
         _pipeline_cancelar.clear()
         _pipeline_detener_fin_id.clear()
-        ejecucion_id = str(solicitud.ejecucion_id or uuid.uuid4().hex)
         proyecto_ejecucion["ejecucion_id"] = ejecucion_id
         # V15.9: la instantánea de rangos se fija ANTES de cualquier trabajo y
         # explica el semáforo de esta ejecución. Si el usuario marcó «Guardar
         # para próximas carpetas», además se persiste como preferencia.
-        instantanea = _resolver_instantanea_para_ejecucion(ejecucion_id, solicitud.rango_apertura)
+        try:
+            instantanea = _resolver_instantanea_para_ejecucion(ejecucion_id, solicitud.rango_apertura)
+        except BaseException:
+            _pipeline_reserva = None   # R15: no dejar reserva colgada si falla
+            raise
         es_reanudacion_checkpoint = (
             _pipeline_estado.get("estado") == "reanudando" and
             str(_pipeline_estado.get("ejecucion_id") or "") == ejecucion_id
@@ -3593,7 +4943,12 @@ def iniciar_pipeline(solicitud: SolicitudPipeline):
                            else datetime.now().isoformat(timespec="seconds"))
         ahora_segmento = datetime.now().isoformat(timespec="milliseconds")
         perfil_rendimiento = normalizar_perfil(solicitud.perfil_rendimiento)
-        obtener_gestor_recursos(perfil_rendimiento).configurar(perfil_rendimiento)
+        try:
+            obtener_gestor_recursos(perfil_rendimiento).configurar(perfil_rendimiento)
+            metricas_iniciales = obtener_gestor_recursos(perfil_rendimiento).snapshot(forzar=True)
+        except BaseException:
+            _pipeline_reserva = None   # R15: no dejar reserva colgada si falla
+            raise
         solicitud_guardada = {
             "ruta": str(ruta), "nombre_excel": nombre_excel,
             "sobrescribir_excel": solicitud.sobrescribir_excel,
@@ -3623,7 +4978,7 @@ def iniciar_pipeline(solicitud: SolicitudPipeline):
             "imagen_actual": None,
             "recursos": capacidad.get("recursos"), "nombre_excel": nombre_excel,
             "perfil_rendimiento": perfil_rendimiento, "contenido": solicitud.contenido,
-            "metricas_recursos": obtener_gestor_recursos(perfil_rendimiento).snapshot(forzar=True),
+            "metricas_recursos": metricas_iniciales,
             "idiomas_exportacion": idiomas_exportacion, "archivos_excel": {},
             "archivos_excel_parcial": {},
             "archivos_excel_borrador": {}, "archivos_excel_parcial_borrador": {},
@@ -3640,9 +4995,44 @@ def iniciar_pipeline(solicitud: SolicitudPipeline):
             "advertencias_cache": [],
             "actualizado_en": datetime.now().isoformat(timespec="milliseconds"),
         })
-    _persistir_checkpoint_pipeline()
+    # R15 (MEDIA-15): el registro persistente del proyecto ocurre solo DESPUÉS
+    # de la admisión atómica del slot. Si el registro falla, la admisión se
+    # revierte (rollback) y no queda un «procesando fantasma» ni reserva colgada.
+    if proyecto_declarado is not None and not proyecto_declarado["sin_asignar"]:
+        try:
+            # P12: colisión de ID con nombre distinto ⇒ 409, sin fusión.
+            registro_proyectos.registrar_proyecto(
+                proyecto_declarado["nombre_proyecto"]
+                or proyecto_declarado["proyecto_id"],
+                proyecto_id=proyecto_declarado["proyecto_id"],
+                responsable=proyecto_declarado["usuario"])
+        except registro_proyectos.ColisionProyectoError as exc:
+            _rollback_admision_pipeline(estado_anterior)
+            raise HTTPException(409, str(exc)) from exc
+        except ValueError as exc:
+            _rollback_admision_pipeline(estado_anterior)
+            raise HTTPException(400, str(exc)) from exc
+        except registro_proyectos.RegistroProyectosCorruptoError as exc:
+            # CRIT-04: fallar cerrado ANTES de procesar; el registro no se
+            # toca (cero bytes modificados) y el error es visible.
+            _rollback_admision_pipeline(estado_anterior)
+            raise HTTPException(503, f"Registro de proyectos ilegible: {exc}") from exc
+        except registro_proyectos.ErrorPersistenciaProyectos as exc:
+            _rollback_admision_pipeline(estado_anterior)
+            raise HTTPException(503, f"El proyecto no se registró: {exc}") from exc
+        except Exception as exc:  # noqa: BLE001 — fallo no previsto del registro
+            _rollback_admision_pipeline(estado_anterior)
+            raise HTTPException(503, f"El proyecto no se registró: {exc}") from exc
 
-    _pipeline_hilo = threading.Thread(target=_ejecutar_pipeline_fondo, kwargs={
+    try:
+        _persistir_checkpoint_pipeline()
+    except BaseException:
+        # R15: no admitir un procesamiento cuyo checkpoint no se pudo persistir
+        # (persistencia atómica verificada); la admisión se revierte.
+        _rollback_admision_pipeline(estado_anterior)
+        raise
+
+    hilo_pipeline = threading.Thread(target=_ejecutar_pipeline_fondo, kwargs={
         "ruta": ruta, "nombre_excel": nombre_excel,
         "sobrescribir_excel": solicitud.sobrescribir_excel,
         "tipo_st": solicitud.tipo_st, "ruta_plantilla": ruta_plantilla,
@@ -3657,7 +5047,21 @@ def iniciar_pipeline(solicitud: SolicitudPipeline):
         "criterios_apertura": dict(instantanea),
         "proyecto": proyecto_declarado,
     }, daemon=True)
-    _pipeline_hilo.start()
+    # R15 (CRIT-01): se asigna el slot global mientras la reserva sigue activa
+    # (is_alive() de un hilo no arrancado es False; la reserva cierra ese hueco)
+    # y se libera solo tras un arranque verificado. Si start() falla, rollback
+    # completo: estado anterior + slot libre + checkpoint repersistido.
+    with _pipeline_lock:
+        _pipeline_hilo = hilo_pipeline
+    try:
+        hilo_pipeline.start()
+    except BaseException as exc:  # noqa: BLE001 — rollback + 500 explícito
+        _rollback_admision_pipeline(estado_anterior, hilo_fallido=hilo_pipeline)
+        raise HTTPException(500, f"No se pudo iniciar el worker de procesamiento: {exc}") from exc
+    with _pipeline_lock:
+        if (_pipeline_reserva is not None
+                and _pipeline_reserva.get("ejecucion_id") == ejecucion_id):
+            _pipeline_reserva = None
     # Trazabilidad C7: la ejecución queda anotada en el registro de proyectos.
     advertencia_registro = None
     try:
@@ -3966,17 +5370,41 @@ def pruebas(q: str = "", estado: str = "", limit: int = Query(200, ge=1, le=1000
     datos = _cargar_datos()
     with _pipeline_lock:
         parciales = [dict(f) for f in _pipeline_estado.get("resultados_parciales", [])]
+        estado_pipeline = _pipeline_estado.get("estado")
+        ejecucion_ckpt = _pipeline_estado.get("ejecucion_id")
+        progreso_ckpt = _pipeline_estado.get("porcentaje")
     if not datos and not parciales:
         raise HTTPException(404, "Sin datos procesados.")
+    # R15.4 (MEDIUM-03): los parciales de un checkpoint sólo son vista válida
+    # cuando el pipeline está realmente en curso/recuperable. Un checkpoint
+    # histórico (p. ej. 'completado') con documento oficial AUSENTE no puede
+    # presentarse como resultado actual: estado claro de recuperación.
+    checkpoint_vigente = estado_pipeline in _ESTADOS_CHECKPOINT_VIGENTE
+    fuente = "documento"
+    if not datos:
+        if not checkpoint_vigente:
+            raise HTTPException(503, (
+                "El documento oficial de resultados "
+                "(validacion_resultados.json) no existe. Se conserva un "
+                f"checkpoint de una corrida en estado "
+                f"'{estado_pipeline or 'desconocido'}' (ejecución "
+                f"{ejecucion_ckpt or 'sin id'}, progreso {progreso_ckpt or 0}%). "
+                "Esos resultados parciales NO se muestran como actuales: "
+                "reprocesa el lote o restaura el documento oficial."))
+        fuente = "checkpoint_recuperacion"
     revisiones = GestorAprendizaje(CONFIG).listar_revisiones()
     atendidas = GestorAprendizaje(CONFIG).listar_alertas_atendidas()
     filas = [_fila_publica(f, revisiones, atendidas) for f in (datos or {}).get("resultados", [])]
     por_id = {f["id"]: f for f in filas}
-    for parcial in parciales:
-        if parcial.get("origen") == "carpeta":
-            # El parcial puede haberse creado antes de que el usuario cambiara la
-            # revisión. Nunca debe tapar una revisión persistida más reciente.
-            por_id[parcial["id"]] = _revision_vigente_en_fila_publica(parcial, revisiones)
+    if checkpoint_vigente:
+        for parcial in parciales:
+            if parcial.get("origen") == "carpeta":
+                # El parcial puede haberse creado antes de que el usuario cambiara la
+                # revisión. Nunca debe tapar una revisión persistida más reciente.
+                publicada = _revision_vigente_en_fila_publica(parcial, revisiones)
+                if fuente == "checkpoint_recuperacion":
+                    publicada = {**publicada, "fuente": "checkpoint_recuperacion"}
+                por_id[parcial["id"]] = publicada
     filas = list(por_id.values())
     externas = _externas_publicas(incluir_ocultos=True)
     filas.extend(_fila_externa_publica(f) for f in externas.get("resultados", []))
@@ -3998,7 +5426,13 @@ def pruebas(q: str = "", estado: str = "", limit: int = Query(200, ge=1, le=1000
             continue
         filtradas.append(f)
     return {"total": len(filtradas), "items": filtradas[offset:offset + limit],
-            "incluye_externas": True}
+            "incluye_externas": True,
+            # R15.4 (MEDIUM-03): fuente explícita de la vista para que el
+            # frontend comunique cuándo está mostrando una recuperación.
+            "fuente": fuente,
+            # R15.2 (ALTO-04): la UI necesita la revisión vigente para enviar
+            # expected_revision en cada mutación (CAS estricto).
+            "revision_documento": int((datos or {}).get("revision_documento") or 0)}
 
 
 @app.get("/api/proyectos")
@@ -4165,6 +5599,7 @@ def descargar_borrador(archivo: str):
 @app.post("/api/resultados/consolidar")
 def consolidar_resultados(solicitud: SolicitudConsolidacion):
     """Une ejecuciones separadas 1ST/2ST de forma idempotente sin repetir OCR."""
+    _assert_documento_editable("consolidar resultados")
     from utilidades.consolidacion import consolidar_documentos
     documentos=[]; usados=[]
     for declarada in solicitud.archivos:
@@ -4174,21 +5609,37 @@ def consolidar_resultados(solicitud: SolicitudConsolidacion):
         except (OSError,json.JSONDecodeError) as exc: raise HTTPException(400,f"No se pudo leer {ruta.name}: {exc}") from exc
         if not isinstance(doc,dict) or not isinstance(doc.get("resultados"),list): raise HTTPException(400,f"{ruta.name} no es una ejecución OCR consolidable.")
         documentos.append(doc); usados.append(str(ruta))
-    actual=_cargar_datos()
-    if actual: documentos.insert(0,deepcopy(actual))
-    consolidado=consolidar_documentos(documentos); consolidado["fuentes_consolidadas"]=usados
-    # Conserva preferencias de exportación del proyecto actual y, si no existen,
-    # usa la unión de idiomas declarados por las ejecuciones consolidadas.
-    idiomas=[]
-    for doc in documentos:
-        for codigo in doc.get("idiomas_exportacion") or []:
-            codigo=str(codigo).lower()
-            if codigo in {"es","en","de"} and codigo not in idiomas: idiomas.append(codigo)
-    consolidado["idiomas_exportacion"] = idiomas or ["es"]
-    if actual:
-        for clave in ("archivo_excel","archivos_excel","nombre_excel_base","ruta_plantilla"):
-            if actual.get(clave) is not None: consolidado[clave]=deepcopy(actual.get(clave))
-    _guardar_json_atomico(RUTA_VALIDACION,consolidado); _cache.update({"mtime":None,"datos":None})
+    # R15.1 (CRÍTICO-01): consolida sobre el documento FRESCO en disco (el
+    # snapshot cacheado podía perder commits concurrentes al reescribir todo).
+    hay_actual = RUTA_VALIDACION.exists()
+
+    def _consolidar_en_fresco(frescos: dict):
+        documentos_cb = ([deepcopy(frescos)] if hay_actual else []) + documentos
+        consolidado_cb = consolidar_documentos(documentos_cb)
+        consolidado_cb["fuentes_consolidadas"] = usados
+        # Conserva preferencias de exportación del proyecto actual y, si no
+        # existen, usa la unión de idiomas declarados por las ejecuciones.
+        idiomas = []
+        for doc in documentos_cb:
+            for codigo in doc.get("idiomas_exportacion") or []:
+                codigo = str(codigo).lower()
+                if codigo in {"es", "en", "de"} and codigo not in idiomas:
+                    idiomas.append(codigo)
+        consolidado_cb["idiomas_exportacion"] = idiomas or ["es"]
+        if hay_actual:
+            for clave in ("archivo_excel", "archivos_excel", "nombre_excel_base", "ruta_plantilla"):
+                if frescos.get(clave) is not None:
+                    consolidado_cb[clave] = deepcopy(frescos.get(clave))
+        # Revisión monotónica global: el documento consolidado no puede
+        # reiniciar el contador (criterio de liberación del auditor R15).
+        revision_previa = int(frescos.get("revision_documento") or 0)
+        frescos.clear(); frescos.update(consolidado_cb)
+        if int(frescos.get("revision_documento") or 0) < revision_previa:
+            frescos["revision_documento"] = revision_previa
+        return consolidado_cb
+
+    consolidado = mutar_documento(_consolidar_en_fresco, solicitud.expected_revision,
+                                  permitir_ausente=True, estricto=True)[1]
     excel=None
     if solicitud.regenerar_excel:
         try: excel=str(_generar_excel_asociado())
@@ -4297,6 +5748,7 @@ def _aplicar_campo_manual_en_fila(fila: dict, campo: str, valor: str, usuario: s
 @app.post("/api/casos/{clave}/campos/{campo}")
 def corregir_campo_caso(clave: str, campo: str, solicitud: SolicitudCampoManual):
     """Confirma una clave del contrato activo sin alterar archivos originales."""
+    _assert_documento_editable("corregir el campo")
     datos = _cargar_datos()
     fila = next((f for f in (datos or {}).get("resultados", []) if _id_fila(f) == clave), None)
     if not fila or fila.get("perfil") != "empresarial":
@@ -4316,58 +5768,83 @@ def corregir_campo_caso(clave: str, campo: str, solicitud: SolicitudCampoManual)
         if not math.isfinite(numero) or numero <= 0 or numero > 1000:
             raise HTTPException(400, "El tiempo de apertura debe ser finito, > 0 y ≤ 1000 ms.")
         valor = f"{numero:g}"
-    ahora_iso = datetime.now().isoformat(timespec="seconds")
-    correccion = {"valor": valor, "corregido_en": ahora_iso,
-                  "corregido_por": solicitud.usuario,
-                  "componente": getattr(solicitud, "componente", None) or "por_identificar"}
-    fila.setdefault("correcciones_manual_campos", {})[campo] = correccion
-    original_ruta = fila.get(campo) if campo in {
-        "test_number", "module_version", "inflator_type", "temperature_condition"} else None
-    conflicto_ruta = original_ruta not in {None, "", valor}
-    referencia_tiempo_valida = False
-    requiere_revision_campo = conflicto_ruta or campo == "opening_time_ms"
-    dato = {"valor": valor, "valor_original": valor,
-            "estado": "pendiente_revision" if requiere_revision_campo else "confirmado_manual",
-            "fuente": "correccion_manual_confirmada", "confianza": 1.0,
-            "inferido": False, "requiere_revision": requiere_revision_campo,
-            "valor_seguro_ruta": original_ruta if conflicto_ruta else None,
-            "componente": getattr(solicitud, "componente", None) or "por_identificar",
-            **correccion}
-    if campo == "opening_time_ms":
-        dato.update({
-            "raw_time_ms": valor,
-            "referencia_tiempo_valida": referencia_tiempo_valida,
-            "estado_tiempo": "REFERENCIA_INVALIDA",
-            "motivo_rechazo": "La corrección escrita no incluye un cuadro/referencia temporal validada; confirma desde la revisión de video.",
+    # R15.1 (CRÍTICO-01): la mutación se aplica sobre el documento FRESCO y
+    # bajo lock global; el snapshot cacheado sólo se usó para validar.
+    def _aplicar_en_fresco(frescos: dict):
+        fila_f = next((f for f in frescos.get("resultados", [])
+                       if _id_fila(f) == clave), None)
+        if fila_f is None:
+            raise HTTPException(404, "El caso empresarial indicado ya no existe.")
+        ahora_iso = datetime.now().isoformat(timespec="seconds")
+        correccion = {"valor": valor, "corregido_en": ahora_iso,
+                      "corregido_por": solicitud.usuario,
+                      "componente": getattr(solicitud, "componente", None) or "por_identificar"}
+        fila_f.setdefault("correcciones_manual_campos", {})[campo] = correccion
+        original_ruta = fila_f.get(campo) if campo in {
+            "test_number", "module_version", "inflator_type", "temperature_condition"} else None
+        conflicto_ruta = original_ruta not in {None, "", valor}
+        referencia_tiempo_valida = False
+        requiere_revision_campo = conflicto_ruta or campo == "opening_time_ms"
+        dato = {"valor": valor, "valor_original": valor,
+                "estado": "pendiente_revision" if requiere_revision_campo else "confirmado_manual",
+                "fuente": "correccion_manual_confirmada", "confianza": 1.0,
+                "inferido": False, "requiere_revision": requiere_revision_campo,
+                "valor_seguro_ruta": original_ruta if conflicto_ruta else None,
+                "componente": getattr(solicitud, "componente", None) or "por_identificar",
+                **correccion}
+        if campo == "opening_time_ms":
+            dato.update({
+                "raw_time_ms": valor,
+                "referencia_tiempo_valida": referencia_tiempo_valida,
+                "estado_tiempo": "REFERENCIA_INVALIDA",
+                "motivo_rechazo": "La corrección escrita no incluye un cuadro/referencia temporal validada; confirma desde la revisión de video.",
+            })
+        fila_f.setdefault("campos", {})[campo] = dato
+        fila_f.setdefault("consolidado", {}).setdefault("campos", {})[campo] = dato
+        fila_f["campos_faltantes"] = [c for c in fila_f.get("campos_faltantes", []) if c != campo]
+        fila_f["conflictos"] = list(dict.fromkeys([
+            *[c for c in fila_f.get("conflictos", []) if c != campo],
+            *([campo] if conflicto_ruta else []),
+        ]))
+        fila_f["requiere_revision"] = bool(fila_f["conflictos"] or fila_f["campos_faltantes"]
+                                        or dato.get("requiere_revision"))
+        fila_f["consolidado"].update({
+            "campos_faltantes": fila_f["campos_faltantes"],
+            "conflictos": fila_f["conflictos"],
+            "requiere_revision": fila_f["requiere_revision"],
         })
-    fila.setdefault("campos", {})[campo] = dato
-    fila.setdefault("consolidado", {}).setdefault("campos", {})[campo] = dato
-    fila["campos_faltantes"] = [c for c in fila.get("campos_faltantes", []) if c != campo]
-    fila["conflictos"] = list(dict.fromkeys([
-        *[c for c in fila.get("conflictos", []) if c != campo],
-        *([campo] if conflicto_ruta else []),
-    ]))
-    fila["requiere_revision"] = bool(fila["conflictos"] or fila["campos_faltantes"]
-                                    or dato.get("requiere_revision"))
-    fila["consolidado"].update({
-        "campos_faltantes": fila["campos_faltantes"],
-        "conflictos": fila["conflictos"],
-        "requiere_revision": fila["requiere_revision"],
-    })
-    fila.setdefault("comparacion", {})["resultado"] = (
-        "discrepancia" if fila["conflictos"] else
-        "coincidencia_parcial" if fila["campos_faltantes"] else "coincidencia_total")
-    # En el perfil empresarial son claves de plantilla, no tokens OCR.
-    fila["comparacion"]["faltantes"] = []
-    fila.setdefault("historial_acciones", []).append({
-        "tipo": "correccion_campo", "campo": campo, "valor": valor,
-        "usuario": solicitud.usuario, "fecha": ahora_iso,
-        "conflicto_con_ruta": conflicto_ruta,
-    })
-    _guardar_json_atomico(RUTA_VALIDACION, datos)
-    _cache.update({"mtime": None, "datos": None})
-    gestor.actualizar_revision("carpeta", clave, estado="parcial")
-    respuesta = {"campo": campo, "dato": dato, "conflictos": fila["conflictos"]}
+        fila_f.setdefault("comparacion", {})["resultado"] = (
+            "discrepancia" if fila_f["conflictos"] else
+            "coincidencia_parcial" if fila_f["campos_faltantes"] else "coincidencia_total")
+        # En el perfil empresarial son claves de plantilla, no tokens OCR.
+        fila_f["comparacion"]["faltantes"] = []
+        fila_f.setdefault("historial_acciones", []).append({
+            "tipo": "correccion_campo", "campo": campo, "valor": valor,
+            "usuario": solicitud.usuario, "fecha": ahora_iso,
+            "conflicto_con_ruta": conflicto_ruta,
+        })
+        return {"campo": campo, "dato": dato, "conflictos": fila_f["conflictos"]}
+
+    # R15.6 (CRÍTICO-01): el estado de revisión es efecto compensable que se
+    # aplica ANTES del commit documental; si cualquiera falla, el documento no
+    # avanza (o se restaura la revisión). Nunca más documento confirmado con
+    # la revisión durable pendiente.
+    caja: dict = {}
+
+    def _efectos():
+        gestor.actualizar_revision("carpeta", clave, estado="parcial")
+        return None
+
+    def _commit(_resultado):
+        revision_documento, respuesta = mutar_documento(
+            _aplicar_en_fresco, solicitud.expected_revision, estricto=True)
+        respuesta["revision_documento"] = revision_documento
+        caja["respuesta"] = respuesta
+
+    _transaccion_efecto_humano(
+        "corrección manual de campo", gestor, "carpeta", clave,
+        _efectos, recurso=f"carpeta:{clave}", commit_fn=_commit)
+    respuesta = caja["respuesta"]
     _regenerar_excel(respuesta)
     return respuesta
 
@@ -4398,7 +5875,7 @@ def actualizar_regla(regla_id: str, solicitud: SolicitudRegla):
 
 @app.post("/api/casos/{clave}/reprocesar", status_code=202)
 def reprocesar_caso(clave: str, solicitud: SolicitudReproceso):
-    global _pipeline_hilo
+    global _pipeline_hilo, _pipeline_reserva
     datos = _cargar_datos()
     if not datos:
         raise HTTPException(404, "Sin datos procesados.")
@@ -4409,6 +5886,41 @@ def reprocesar_caso(clave: str, solicitud: SolicitudReproceso):
     rutas_validas = {i.get("ruta") for i in fila.get("imagenes", [])}
     if imagenes and not imagenes <= rutas_validas:
         raise HTTPException(400, "Se solicitó una imagen que no pertenece al caso.")
+    with _pipeline_lock, _video_reanalisis_lock:
+        # R15 (ALTA-02): misma admisión atómica que iniciar_pipeline (CRIT-01).
+        # Orden de locks pipeline→reanálisis (sin inversión respecto a /maximo).
+        if _pipeline_hilo is not None and _pipeline_hilo.is_alive():
+            # Mensaje V14 conservado para el caso de hilo vivo.
+            raise HTTPException(409, "Ya hay un procesamiento activo o cerrando recursos.")
+        if _pipeline_reserva is not None:
+            raise HTTPException(409, "Ya hay un procesamiento admitido (reserva en curso).")
+        if _video_reanalisis_hilo is not None and _video_reanalisis_hilo.is_alive():
+            raise HTTPException(409, "Hay un reanálisis de videos en curso; termínalo antes de reprocesar.")
+        estado_anterior = deepcopy(_pipeline_estado)
+        ejecucion_id = f"reproceso-{uuid.uuid4().hex[:12]}"
+        _pipeline_reserva = {
+            "ejecucion_id": ejecucion_id, "origen": "reproceso",
+            "reservado_en": datetime.now().isoformat(timespec="milliseconds")}
+        try:
+            _pipeline_continuar.set()
+            _pipeline_cancelar.clear()
+            _pipeline_estado.update({
+                "estado": "procesando", "fase": "reproceso",
+                "mensaje": "Preparando reproceso selectivo",
+                "ejecucion_id": ejecucion_id,
+                "ruta": datos["raiz"], "iniciado_en": datetime.now().isoformat(timespec="seconds"),
+                "finalizado_en": None, "error": None, "porcentaje": 0,
+                "resultados_parciales": [], "tipo_st": fila.get("tipo_st"),
+            })
+            plantilla = datos.get("ruta_plantilla") or _pipeline_estado.get("ruta_plantilla")
+            nombre_excel = _pipeline_estado.get("nombre_excel")
+        except BaseException:
+            _pipeline_reserva = None
+            _pipeline_estado.clear()
+            _pipeline_estado.update(estado_anterior)
+            raise
+    # R15 (ALTA-02): la ROI preferida es un efecto PERSISTENTE: se guarda solo
+    # tras la admisión (antes se escribía incluso en respuestas 409).
     if solicitud.modo_recorte == "manual" and solicitud.roi_manual:
         objetivo = next((i for i in fila.get("imagenes", [])
                          if not imagenes or i.get("ruta") in imagenes), None)
@@ -4416,24 +5928,15 @@ def reprocesar_caso(clave: str, solicitud: SolicitudReproceso):
             proyecto = str(datos.get("raiz") or "proyecto")
             clave_roi = (Path(objetivo.get("ruta", "imagen")).name
                          if solicitud.roi_alcance == "etiqueta" else proyecto)
-            GestorAprendizaje(CONFIG).guardar_roi_preferida(
-                solicitud.roi_alcance, clave_roi, objetivo.get("fase"),
-                solicitud.roi_manual, solicitud.zoom_forzado)
-    with _pipeline_lock:
-        if _pipeline_hilo is not None and _pipeline_hilo.is_alive():
-            raise HTTPException(409, "Ya hay un procesamiento activo o cerrando recursos.")
-        _pipeline_continuar.set()
-        _pipeline_cancelar.clear()
-        _pipeline_estado.update({
-            "estado": "procesando", "fase": "reproceso", "mensaje": "Preparando reproceso selectivo",
-            "ruta": datos["raiz"], "iniciado_en": datetime.now().isoformat(timespec="seconds"),
-            "finalizado_en": None, "error": None, "porcentaje": 0,
-            "resultados_parciales": [], "tipo_st": fila.get("tipo_st"),
-        })
-        plantilla = datos.get("ruta_plantilla") or _pipeline_estado.get("ruta_plantilla")
-        nombre_excel = _pipeline_estado.get("nombre_excel")
+            try:
+                GestorAprendizaje(CONFIG).guardar_roi_preferida(
+                    solicitud.roi_alcance, clave_roi, objetivo.get("fase"),
+                    solicitud.roi_manual, solicitud.zoom_forzado)
+            except BaseException as exc:  # noqa: BLE001 — rollback + 503
+                _rollback_admision_pipeline(estado_anterior)
+                raise HTTPException(503, f"No se pudo guardar la ROI preferida: {exc}") from exc
     perfil_reproceso = normalizar_perfil(_pipeline_estado.get("perfil_rendimiento") or "alto")
-    _pipeline_hilo = threading.Thread(target=_ejecutar_pipeline_fondo, kwargs={
+    hilo_reproceso = threading.Thread(target=_ejecutar_pipeline_fondo, kwargs={
         "ruta": Path(datos["raiz"]), "nombre_excel": nombre_excel,
         "sobrescribir_excel": True, "tipo_st": fila.get("tipo_st"),
         "ruta_plantilla": plantilla, "casos_filtrados": {fila["case_key"]},
@@ -4443,10 +5946,23 @@ def reprocesar_caso(clave: str, solicitud: SolicitudReproceso):
         "idiomas_exportacion": list((datos.get("idiomas_exportacion") or
                                       _pipeline_estado.get("idiomas_exportacion") or ["es"])),
         "perfil_rendimiento": perfil_reproceso,
+        "ejecucion_id": ejecucion_id,
     }, daemon=True)
-    _pipeline_hilo.start()
+    # R15 (CRIT-01): asignación bajo lock con reserva activa; arranque verificado.
+    with _pipeline_lock:
+        _pipeline_hilo = hilo_reproceso
+    try:
+        hilo_reproceso.start()
+    except BaseException as exc:  # noqa: BLE001 — rollback + 500 explícito
+        _rollback_admision_pipeline(estado_anterior, hilo_fallido=hilo_reproceso)
+        raise HTTPException(500, f"No se pudo iniciar el reproceso: {exc}") from exc
+    with _pipeline_lock:
+        if (_pipeline_reserva is not None
+                and _pipeline_reserva.get("ejecucion_id") == ejecucion_id):
+            _pipeline_reserva = None
     return {"aceptado": True, "case_key": fila["case_key"],
-            "imagenes": len(imagenes), "solo_errores": solicitud.solo_errores}
+            "imagenes": len(imagenes), "solo_errores": solicitud.solo_errores,
+            "ejecucion_id": ejecucion_id}
 
 
 @app.get("/api/pruebas/{clave}")
@@ -4496,6 +6012,8 @@ def detalle(clave: str):
         fila.get("video_apertura_anterior"))
     detalle_json["id"] = _id_fila(fila)
     detalle_json["lote"] = _lote_de(fila)
+    # R15 (MEDIA-14): revisión del documento para CAS en las mutaciones.
+    detalle_json["revision_documento"] = int(datos.get("revision_documento") or 0)
     try:
         from utilidades.resultado_caso import resolver_resultado_caso
         detalle_json["resultado_caso_canonico"] = resolver_resultado_caso(fila)
@@ -4846,6 +6364,7 @@ def _reanalizar_videos_fondo(prueba_id: str | None = None, video_id: str | None 
         errores = 0
         ultimo_error = None
         ahora_etiqueta = datetime.now().isoformat(timespec="seconds")
+        parches: list = []   # R15 (ALTA-03): patch por video, merge al commit
 
         for fila in filas:
             for video_item in videos_objetivo(fila):
@@ -4860,20 +6379,12 @@ def _reanalizar_videos_fondo(prueba_id: str | None = None, video_id: str | None 
                     continue
                 try:
                     nuevo = analizar_video(ruta_local, CONFIG, usar_cache=False)
-                    conservar = {k: video_item.get(k) for k in (
-                        "id", "ruta_relativa", "carpeta_video", "revision_manual",
-                        "ultima_zona_nacimiento"
-                    ) if video_item.get(k) is not None}
-                    anterior = {k: video_item.get(k) for k in (
-                        "frame_evento", "tiempo_ms", "algoritmo_video", "desde_cache"
-                    ) if k in video_item}
-                    video_item.clear()
-                    video_item.update(nuevo)
-                    video_item.update(conservar)
-                    video_item["reanalizado_en"] = ahora_etiqueta
-                    video_item["origen_resultado_video"] = "recalculado_v15_7_4"
-                    video_item["deteccion_anterior"] = anterior
-                    video_item["desde_cache"] = False
+                    # R15 (ALTA-03): NO se muta el snapshot viejo; el patch se
+                    # fusionará al final sobre el documento MÁS RECIENTE.
+                    parches.append({
+                        "fila_id": _id_fila(fila),
+                        "video_id": str(video_item.get("id")),
+                        "nombre": nombre, "nuevo": nuevo})
                 except Exception as exc:
                     errores += 1
                     ultimo_error = f"{nombre}: {type(exc).__name__}: {exc}"
@@ -4881,14 +6392,52 @@ def _reanalizar_videos_fondo(prueba_id: str | None = None, video_id: str | None 
                 _estado_reanalisis_video(
                     procesados=procesados, errores=errores, ultimo_error=ultimo_error)
 
-            consenso = consenso_videos(fila.get("videos") or [], CONFIG)
-            _aplicar_consenso_video_a_fila(fila, consenso)
-
-        datos["generado_en"] = datetime.now().isoformat(timespec="seconds")
-        datos["video_reanalizado_en"] = datos["generado_en"]
-        datos["video_reanalisis_version"] = "15.7.4"
-        escribir_json_seguro(RUTA_VALIDACION, datos, lanzar=True, compacto=True)
-        _cache.update({"mtime": None, "datos": None})
+        # R15 (ALTA-03): commit por merge bajo lock de mutación: se relee el
+        # documento más reciente en disco y se aplican SOLO los patches por
+        # video (campos manuales como revision_manual se conservan desde la
+        # versión fresca). Las ediciones hechas durante el reanálisis sobreviven.
+        filas_alcance = [_id_fila(f) for f in filas]
+        with _lock_documento():
+            datos_frescos = _leer_documento_disco()
+            filas_frescas = {_id_fila(f): f
+                             for f in (datos_frescos.get("resultados") or [])}
+            for parche in parches:
+                fila_fresca = filas_frescas.get(parche["fila_id"])
+                item_fresco = None
+                if fila_fresca is not None:
+                    item_fresco = next(
+                        (v for v in (fila_fresca.get("videos") or [])
+                         if str(v.get("id")) == parche["video_id"]), None)
+                if item_fresco is None:
+                    # El caso/video ya no está en el documento actual: se
+                    # descarta SU patch y se hace visible; nunca en silencio.
+                    errores += 1
+                    ultimo_error = (f"{parche['nombre']}: el caso/video ya no "
+                                    "existe en el documento actual; patch descartado")
+                    continue
+                conservar = {k: item_fresco.get(k) for k in (
+                    "id", "ruta_relativa", "carpeta_video", "revision_manual",
+                    "ultima_zona_nacimiento"
+                ) if item_fresco.get(k) is not None}
+                anterior = {k: item_fresco.get(k) for k in (
+                    "frame_evento", "tiempo_ms", "algoritmo_video", "desde_cache"
+                ) if k in item_fresco}
+                item_fresco.clear()
+                item_fresco.update(parche["nuevo"])
+                item_fresco.update(conservar)
+                item_fresco["reanalizado_en"] = ahora_etiqueta
+                item_fresco["origen_resultado_video"] = "recalculado_v15_7_4"
+                item_fresco["deteccion_anterior"] = anterior
+                item_fresco["desde_cache"] = False
+            for fila_id in filas_alcance:
+                fila_fresca = filas_frescas.get(fila_id)
+                if fila_fresca is None:
+                    continue
+                consenso = consenso_videos(fila_fresca.get("videos") or [], CONFIG)
+                _aplicar_consenso_video_a_fila(fila_fresca, consenso)
+            datos_frescos["video_reanalizado_en"] = datetime.now().isoformat(timespec="seconds")
+            datos_frescos["video_reanalisis_version"] = "15.7.4"
+            _commit_documento(datos_frescos)
         resultado_excel = {}
         _regenerar_excel(resultado_excel)
         _estado_reanalisis_video(
@@ -4918,29 +6467,62 @@ def estado_reanalisis_videos():
 @app.post("/api/video/reanalizar")
 def reanalizar_videos(solicitud: SolicitudReanalisisVideos):
     global _video_reanalisis_hilo
-    with _pipeline_lock:
-        if _pipeline_estado.get("estado") in {"procesando", "pausando", "pausado", "cancelando", "reanudando"}:
+    # R15.3 (CRÍTICO-01): admisión ATÓMICA en una ÚNICA región con el mismo
+    # orden de locks que iniciar_pipeline (_pipeline_lock → _video_reanalisis_lock).
+    # En R15.2 la comprobación del pipeline y la admisión del reanálisis eran
+    # dos secciones distintas: entre ellas el pipeline podía ser admitido y
+    # ambos procesos quedaban activos a la vez. Validación, reserva de estado,
+    # creación y arranque del hilo ocurren sin liberar los locks.
+    with _pipeline_lock, _video_reanalisis_lock:
+        # R15: también se rechaza si el slot está RESERVADO (admisión en curso)
+        # o si hay un hilo creado pero todavía no arrancado (is_alive()=False).
+        if (_pipeline_estado.get("estado") in {"procesando", "pausando", "pausado",
+                                               "cancelando", "reanudando"}
+                or _slot_pipeline_ocupado_locked()):
             raise HTTPException(409, "Detén o termina el procesamiento OCR antes de reanalizar videos.")
-    with _video_reanalisis_lock:
         if _video_reanalisis_hilo is not None and _video_reanalisis_hilo.is_alive():
             raise HTTPException(409, "Ya hay un reanálisis de videos en curso.")
+        estado_anterior = dict(_video_reanalisis_estado)
         _video_reanalisis_estado.update({
             "estado": "preparando", "mensaje": ("Preparando recálculo del video" if solicitud.video_id else "Preparando reanálisis de video"),
             "prueba_id": solicitud.prueba_id, "video_id": solicitud.video_id, "total_videos": 0, "procesados": 0,
             "errores": 0, "video_actual": None, "iniciado_en": datetime.now().isoformat(timespec="seconds"),
             "finalizado_en": None, "ultimo_error": None, "algoritmo": None,
         })
-        _video_reanalisis_hilo = threading.Thread(
+        hilo = threading.Thread(
             target=_reanalizar_videos_fondo, args=(solicitud.prueba_id, solicitud.video_id), daemon=True)
-        _video_reanalisis_hilo.start()
+        # El slot se reserva con el hilo creado (aún no arrancado) dentro de la
+        # misma región: ninguna admisión concurrente puede colarse.
+        _video_reanalisis_hilo = hilo
+        try:
+            hilo.start()
+        except BaseException as exc:  # noqa: BLE001 — rollback + 500 explícito
+            # R15.3 (MEDIO-05): nunca dejar «preparando fantasma»: se restaura
+            # el estado anterior, se marca el error visible y se libera el slot
+            # (mismo criterio que _rollback_admision_pipeline en el pipeline).
+            if _video_reanalisis_hilo is hilo:
+                _video_reanalisis_hilo = None
+            _video_reanalisis_estado.clear()
+            _video_reanalisis_estado.update(estado_anterior)
+            _video_reanalisis_estado.update({
+                "estado": "error",
+                "mensaje": "El reanálisis no pudo arrancar",
+                "finalizado_en": datetime.now().isoformat(timespec="seconds"),
+                "ultimo_error": str(exc) or exc.__class__.__name__,
+            })
+            raise HTTPException(500, f"El reanálisis no pudo arrancar: {exc}") from exc
     return {"aceptado": True, "estado": "preparando", "prueba_id": solicitud.prueba_id, "video_id": solicitud.video_id}
 
 
 @app.post("/api/video/revision")
 def revisar_video(solicitud: SolicitudRevisionVideo):
+    # R15 (ALTA-07, pruebas obligatorias 6 y 8): guard servidor autoritativo;
+    # 409 sin efectos laterales si hay pipeline activo/reservado o reanálisis.
+    _guard_mutacion_video("revisar el video")
     datos = _cargar_datos()
     if not datos:
         raise HTTPException(404, "Sin datos procesados.")
+    _verificar_expected_revision(solicitud.expected_revision, datos, estricto=True)
     fila = next((f for f in datos.get("resultados", []) if _id_fila(f) == solicitud.prueba_id), None)
     if fila is None:
         raise HTTPException(404, "No existe el ID solicitado.")
@@ -4951,8 +6533,12 @@ def revisar_video(solicitud: SolicitudRevisionVideo):
     if raiz is None:
         raise HTTPException(503, "La raíz del lote no está disponible en este equipo.")
     ruta_local = _resolver_imagen(str(video_item.get("ruta") or ""), datos, raiz)
-    from video_airbag import (guardar_revision_video, consenso_videos, resolver_tiempo_frame,
-                              fps_real_item, normalizar_videos_caso)
+    # R15 (ALTA-07): pre-chequeo ANTES de efectos persistentes (el archivo
+    # durable de la revisión); en el commit se revalida contra el fresco.
+    _verificar_revision_no_completada(solicitud.prueba_id, fila, "revisar el video")
+    from video_airbag import (cargar_revisiones, guardar_revision_video, consenso_videos, resolver_tiempo_frame,
+                              fps_real_item, normalizar_videos_caso,
+                              ErrorPersistenciaRevisiones)
     normalizar_videos_caso(fila.get("videos") or [], CONFIG)
     evento_censurado = _evento_censurado_video_api(video_item)
     if solicitud.estado == "confirmado" and evento_censurado:
@@ -4987,78 +6573,146 @@ def revisar_video(solicitud: SolicitudRevisionVideo):
         if not referencia_tiempo_valida:
             raise HTTPException(422, "No hay una referencia temporal validada para confirmar la apertura.")
 
-    revision = guardar_revision_video(
-        ruta_local, case_key=fila.get("case_key"), frame_index=solicitud.frame_index,
-        tiempo_ms=(tiempo_confirmado if solicitud.estado == "confirmado" else None),
-        estado=solicitud.estado, usuario=solicitud.usuario, comentario=solicitud.comentario,
-        fuente_tiempo=(tiempo_resuelto or {}).get("fuente_tiempo"),
-        referencia_tiempo_valida=(referencia_tiempo_valida if solicitud.estado == "confirmado" else None),
-        evento_censurado=evento_censurado,
-        tiempo_overlay_leido_ms=(tiempo_resuelto or {}).get("tiempo_overlay_leido_ms"),
-        tiempo_overlay_validado_ms=(tiempo_resuelto or {}).get("tiempo_overlay_ms"),
-        tiempo_fps_ms=(tiempo_resuelto or {}).get("tiempo_fps_ms"),
-        discrepancia_tiempo_ms=(tiempo_resuelto or {}).get("discrepancia_ms"),
-        advertencia_tiempo=(tiempo_resuelto or {}).get("advertencia"))
-    video_item["revision_manual"] = revision
-    if solicitud.frame_index is not None and solicitud.estado == "confirmado":
-        video_item["frame_evento"] = int(solicitud.frame_index)
-    if tiempo_confirmado is not None:
-        video_item["tiempo_ms"] = round(float(tiempo_confirmado), 1)
-        video_item["tiempo_overlay_ms"] = tiempo_resuelto.get("tiempo_overlay_ms")
-        video_item["tiempo_overlay_leido_ms"] = tiempo_resuelto.get("tiempo_overlay_leido_ms")
-        video_item["tiempo_fps_ms"] = tiempo_resuelto.get("tiempo_fps_ms")
-        video_item["fuente_tiempo"] = tiempo_resuelto.get("fuente_tiempo")
-        video_item["discrepancia_tiempo_ms"] = tiempo_resuelto.get("discrepancia_ms")
-        video_item["advertencia_tiempo"] = tiempo_resuelto.get("advertencia")
-        video_item["overlay_validado"] = bool(tiempo_resuelto.get("overlay_valido"))
-        if tiempo_resuelto.get("fps"):
-            video_item["fps"] = float(tiempo_resuelto.get("fps"))
-            video_item["fps_grabacion"] = float(tiempo_resuelto.get("fps"))
-            video_item["fps_fuente"] = video_item.get("fps_fuente") if fps_real_item(video_item) else tiempo_resuelto.get("fps_fuente")
-            video_item["resolucion_nativa_ms"] = round(1000.0 / float(tiempo_resuelto.get("fps")), 6)
-        if tiempo_resuelto.get("overlay_texto_esquina"):
-            video_item["overlay_texto_esquina"] = tiempo_resuelto.get("overlay_texto_esquina")
+    # R15 (ALTA-03): los cambios al item se aplican en el commit sobre el
+    # documento MÁS RECIENTE (bajo lock), no sobre la primera lectura.
+    # R15.3 (ALTO-02): el registro durable de la revisión se movió DENTRO de
+    # la región de lock, después del CAS autoritativo (más abajo).
+    perfil_aprendido = None
 
-    # V15.7.4: una confirmación guarda dos escalas distintas:
-    #   1) ROI general = dónde debe mirar el detector;
-    #   2) microzona = dónde aparece exactamente el primer fragmento.
-    # Si el usuario no dibujó la microzona, el backend la propone automáticamente
-    # comparando F-3..F-1 con el cuadro confirmado y su crecimiento posterior.
+    def _aplicar_a_item(item: dict) -> None:
+        item["revision_manual"] = revision
+        if solicitud.frame_index is not None and solicitud.estado == "confirmado":
+            item["frame_evento"] = int(solicitud.frame_index)
+        if tiempo_confirmado is not None:
+            item["tiempo_ms"] = round(float(tiempo_confirmado), 1)
+            item["tiempo_overlay_ms"] = tiempo_resuelto.get("tiempo_overlay_ms")
+            item["tiempo_overlay_leido_ms"] = tiempo_resuelto.get("tiempo_overlay_leido_ms")
+            item["tiempo_fps_ms"] = tiempo_resuelto.get("tiempo_fps_ms")
+            item["fuente_tiempo"] = tiempo_resuelto.get("fuente_tiempo")
+            item["discrepancia_tiempo_ms"] = tiempo_resuelto.get("discrepancia_ms")
+            item["advertencia_tiempo"] = tiempo_resuelto.get("advertencia")
+            item["overlay_validado"] = bool(tiempo_resuelto.get("overlay_valido"))
+            if tiempo_resuelto.get("fps"):
+                item["fps"] = float(tiempo_resuelto.get("fps"))
+                item["fps_grabacion"] = float(tiempo_resuelto.get("fps"))
+                item["fps_fuente"] = item.get("fps_fuente") if fps_real_item(item) else tiempo_resuelto.get("fps_fuente")
+                item["resolucion_nativa_ms"] = round(1000.0 / float(tiempo_resuelto.get("fps")), 6)
+            if tiempo_resuelto.get("overlay_texto_esquina"):
+                item["overlay_texto_esquina"] = tiempo_resuelto.get("overlay_texto_esquina")
+        if localizacion_nacimiento is not None:
+            item["ultima_zona_nacimiento"] = localizacion_nacimiento
+        if perfil_aprendido is not None:
+            item["perfil_evento_aprendido"] = perfil_aprendido
+
+    # V15.7.4: una confirmación guarda dos escalas distintas (ROI general y
+    # microzona). R15.5 (HIGH-01): la escritura del dataset de eventos es un
+    # efecto OPCIONAL posterior al commit principal (más abajo); dentro del
+    # lock sólo queda la localización pura (su resultado es parte del
+    # documento: ultima_zona_nacimiento).
     ejemplo_aprendido = None
     advertencia_aprendizaje = None
     localizacion_nacimiento = None
-    if solicitud.estado == "confirmado" and solicitud.frame_index is not None:
+    datos_aprendizaje = None
+
+    # R15 (ALTA-03 + MEDIA-14): commit sobre el documento MÁS RECIENTE, bajo
+    # lock de mutación, con CAS y revalidación de revisión completada.
+    # R15.3 (ALTO-02): el CAS de esta región es AUTORITATIVO y el efecto
+    # durable autoritativo (registro de revisión) ocurre DENTRO de la misma
+    # exclusión: un 409 sólo puede emitirse antes de cualquier efecto
+    # persistente. R15.5 (HIGH-01): el dataset de eventos es efecto OPCIONAL
+    # y se entrena sólo tras el commit exitoso (fuera del lock). R15
+    # (ALTA-04) se conserva: si el registro durable falla, se reporta error y
+    # la revisión NO se aplica al documento.
+    # R15.5 (P0): política transaccional común — snapshot verificado del
+    # almacén durable y compensación coordinada ante cualquier fallo.
+    _assert_recurso_consistente(str(ruta_local), "revisar el video")
+    tx = TransaccionMultiAlmacen("revisión de video", recurso=str(ruta_local))
+    with _lock_documento():
+        datos_frescos = _leer_documento_disco()
+        _verificar_expected_revision(solicitud.expected_revision, datos_frescos,
+                                                estricto=True)
+        fila_fresca, item_fresco = _localizar_fila_video(
+            datos_frescos, solicitud.prueba_id, solicitud.video_id)
+        _verificar_revision_no_completada(solicitud.prueba_id, fila_fresca,
+                                          "revisar el video")
+        # R15.4 (HIGH-01): snapshot del registro durable ANTES del efecto.
+        revisiones_antes = tx.capturar("revisiones de video", cargar_revisiones,
+                                       _restaurar_revisiones_video)
         try:
-            from aprendizaje_video_airbag import (guardar_ejemplo_evento, perfil_evento_aprendido,
-                                                   localizar_nacimiento_evento, _bbox_evento_normalizada)
-            zona = (video_item.get("zona_deteccion") or {}).get("bbox_norm")
-            tipo_camara = (video_item.get("tipo_camara") or
-                           (video_item.get("zona_deteccion") or {}).get("tipo_camara"))
-            bbox_evento = None
-            if solicitud.bbox_evento_norm:
-                bbox_evento = _bbox_evento_normalizada(solicitud.bbox_evento_norm)
-                localizacion_nacimiento = {
-                    "bbox_norm": bbox_evento, "frame_index": int(solicitud.frame_index),
-                    "metodo": "manual_dashboard", "confianza": 1.0,
-                }
-            else:
-                localizacion_nacimiento = localizar_nacimiento_evento(
-                    ruta_local, frame_index=int(solicitud.frame_index), bbox_norm=zona)
-                bbox_evento = localizacion_nacimiento.get("bbox_norm")
+            try:
+                revision = guardar_revision_video(
+                    ruta_local, case_key=fila_fresca.get("case_key"),
+                    frame_index=solicitud.frame_index,
+                    tiempo_ms=(tiempo_confirmado if solicitud.estado == "confirmado" else None),
+                    estado=solicitud.estado, usuario=solicitud.usuario,
+                    comentario=solicitud.comentario,
+                    fuente_tiempo=(tiempo_resuelto or {}).get("fuente_tiempo"),
+                    referencia_tiempo_valida=(referencia_tiempo_valida if solicitud.estado == "confirmado" else None),
+                    evento_censurado=evento_censurado,
+                    tiempo_overlay_leido_ms=(tiempo_resuelto or {}).get("tiempo_overlay_leido_ms"),
+                    tiempo_overlay_validado_ms=(tiempo_resuelto or {}).get("tiempo_overlay_ms"),
+                    tiempo_fps_ms=(tiempo_resuelto or {}).get("tiempo_fps_ms"),
+                    discrepancia_tiempo_ms=(tiempo_resuelto or {}).get("discrepancia_ms"),
+                    advertencia_tiempo=(tiempo_resuelto or {}).get("advertencia"))
+            except ErrorPersistenciaRevisiones as exc:
+                raise HTTPException(503, f"La revisión no se guardó: {exc}") from exc
+            tx.aplicado()  # la revisión durable QUEDÓ guardada
+            if solicitud.estado == "confirmado" and solicitud.frame_index is not None:
+                try:
+                    from aprendizaje_video_airbag import (perfil_evento_aprendido,
+                                                           localizar_nacimiento_evento, _bbox_evento_normalizada)
+                    zona = (item_fresco.get("zona_deteccion") or {}).get("bbox_norm")
+                    tipo_camara = (item_fresco.get("tipo_camara") or
+                                   (item_fresco.get("zona_deteccion") or {}).get("tipo_camara"))
+                    bbox_evento = None
+                    if solicitud.bbox_evento_norm:
+                        bbox_evento = _bbox_evento_normalizada(solicitud.bbox_evento_norm)
+                        localizacion_nacimiento = {
+                            "bbox_norm": bbox_evento, "frame_index": int(solicitud.frame_index),
+                            "metodo": "manual_dashboard", "confianza": 1.0,
+                        }
+                    else:
+                        localizacion_nacimiento = localizar_nacimiento_evento(
+                            ruta_local, frame_index=int(solicitud.frame_index), bbox_norm=zona)
+                        bbox_evento = localizacion_nacimiento.get("bbox_norm")
+                    # R15.5 (HIGH-01): la escritura del dataset NO ocurre aquí;
+                    # se guarda lo necesario para entrenar sólo si el commit
+                    # documental tiene éxito.
+                    datos_aprendizaje = {
+                        "zona": zona, "tipo_camara": tipo_camara,
+                        "bbox_evento": bbox_evento, "fps_item": item_fresco.get("fps"),
+                    }
+                    perfil_aprendido = perfil_evento_aprendido(tipo_camara)
+                except Exception as exc:  # La revisión manual nunca debe perderse por un fallo del aprendizaje.
+                    advertencia_aprendizaje = f"{type(exc).__name__}: {exc}"
+            _aplicar_a_item(item_fresco)
+            consenso = consenso_videos(fila_fresca.get("videos") or [], CONFIG)
+            _aplicar_consenso_video_a_fila(fila_fresca, consenso)
+            revision_documento = _commit_documento(datos_frescos)
+        except BaseException as exc:
+            # Commit fallido (o cualquier error tras el registro durable) ⇒
+            # la revisión durable NO puede sobrevivir a la petición fallida.
+            # R15.5 (P0): compensación verificada vía coordinador; doble
+            # fallo ⇒ estado inconsistente explícito (nunca «restaurada»).
+            tx.fallar(exc)
+    tx.exito()
+    # R15.5 (HIGH-01): fase 2 del aprendizaje — efecto OPCIONAL posterior al
+    # commit principal. La confirmación humana ya está commiteada de forma
+    # transaccional; si el dataset falla aquí, se devuelve éxito con
+    # `advertencia_aprendizaje` (sin revertir la revisión), y una petición
+    # fallida (503/409 anterior) NUNCA deja ejemplos entrenados.
+    if datos_aprendizaje is not None and advertencia_aprendizaje is None:
+        try:
+            from aprendizaje_video_airbag import guardar_ejemplo_evento
             ejemplo_aprendido = guardar_ejemplo_evento(
-                ruta_local, frame_index=int(solicitud.frame_index), bbox_norm=zona,
-                bbox_evento_norm=bbox_evento, tipo_camara=tipo_camara,
-                tiempo_ms=tiempo_confirmado, fps=video_item.get("fps"), usuario=solicitud.usuario)
-            video_item["ultima_zona_nacimiento"] = localizacion_nacimiento
-            video_item["perfil_evento_aprendido"] = perfil_evento_aprendido(tipo_camara)
+                ruta_local, frame_index=int(solicitud.frame_index),
+                bbox_norm=datos_aprendizaje["zona"],
+                bbox_evento_norm=datos_aprendizaje["bbox_evento"],
+                tipo_camara=datos_aprendizaje["tipo_camara"],
+                tiempo_ms=tiempo_confirmado, fps=datos_aprendizaje["fps_item"],
+                usuario=solicitud.usuario)
         except Exception as exc:  # La revisión manual nunca debe perderse por un fallo del dataset.
             advertencia_aprendizaje = f"{type(exc).__name__}: {exc}"
-
-    consenso = consenso_videos(fila.get("videos") or [], CONFIG)
-    _aplicar_consenso_video_a_fila(fila, consenso)
-    datos["generado_en"] = datetime.now().isoformat(timespec="seconds")
-    escribir_json_seguro(RUTA_VALIDACION, datos, lanzar=True, compacto=True)
-    _cache.update({"mtime": None, "datos": None})
     diferencia_cliente_ms = None
     if tiempo_confirmado is not None and solicitud.tiempo_ms is not None:
         try:
@@ -5067,6 +6721,7 @@ def revisar_video(solicitud: SolicitudRevisionVideo):
             diferencia_cliente_ms = None
     resultado = {
         "revision": revision, "consenso": consenso, "guardado": True,
+        "revision_documento": revision_documento,
         "tiempo_resuelto": tiempo_resuelto,
         "diferencia_cliente_ms": diferencia_cliente_ms,
         "ejemplo_aprendido": ejemplo_aprendido,
@@ -5081,11 +6736,16 @@ def revisar_video(solicitud: SolicitudRevisionVideo):
 def confirmar_maximo_video(solicitud: SolicitudMaximoVideo):
     """El revisor marca máximo visible; no equivale a apertura/inflado completo."""
     with _pipeline_lock, _video_reanalisis_lock:
+        # R15.2 (CRÍTICO-02): mismo criterio de slot que el resto de guards;
+        # antes no contemplaba el slot reservado ni el hilo vivo sin estado.
         if (_pipeline_estado.get("estado") in {
                 "procesando", "pausando", "pausado", "cancelando", "reanudando"}
+                or _slot_pipeline_ocupado_locked()
                 or (_video_reanalisis_hilo is not None and _video_reanalisis_hilo.is_alive())):
             raise HTTPException(409, "Termina o detén el procesamiento antes de confirmar el máximo.")
         datos = _cargar_datos() or {}
+        # R15 (MEDIA-14): CAS de documento también al confirmar el máximo.
+        _verificar_expected_revision(solicitud.expected_revision, datos, estricto=True)
         fila = next((f for f in datos.get("resultados", [])
                      if _id_fila(f) == solicitud.prueba_id), None)
         if fila is None:
@@ -5140,7 +6800,8 @@ def confirmar_maximo_video(solicitud: SolicitudMaximoVideo):
         # Guardado durable antes de invalidar vista/exportar. No se toca el
         # JSON de resultados ni se entrena con una etiqueta temporal distinta.
         _cache.update({"mtime": None, "datos": None})
-    resultado = {"guardado": True, "despliegue_maximo": revision, "tiempo_resuelto": resuelto}
+    resultado = {"guardado": True, "despliegue_maximo": revision, "tiempo_resuelto": resuelto,
+                 "revision_documento": int((datos or {}).get("revision_documento") or 0)}
     _regenerar_excel(resultado)
     return resultado
 
@@ -5177,9 +6838,12 @@ def refinar_zona_apertura_video(solicitud: SolicitudRefinarZonaVideo):
 @app.post("/api/video/zona-aprendizaje")
 def aprender_zona_video(solicitud: SolicitudZonaVideo):
     """Guarda una zona supervisada y reprocesa el video con ese aprendizaje."""
+    # R15 (ALTA-07): guard servidor autoritativo antes de cualquier efecto.
+    _guard_mutacion_video("aprender la zona")
     datos = _cargar_datos()
     if not datos:
         raise HTTPException(404, "Sin datos procesados.")
+    _verificar_expected_revision(solicitud.expected_revision, datos, estricto=True)
     fila = next((f for f in datos.get("resultados", []) if _id_fila(f) == solicitud.prueba_id), None)
     if fila is None:
         raise HTTPException(404, "No existe el ID solicitado.")
@@ -5190,6 +6854,8 @@ def aprender_zona_video(solicitud: SolicitudZonaVideo):
     if raiz is None:
         raise HTTPException(503, "La raíz del lote no está disponible en este equipo.")
     ruta_local = _resolver_imagen(str(video_item.get("ruta") or ""), datos, raiz)
+    # R15 (ALTA-07): pre-chequeo ANTES de guardar la zona aprendida.
+    _verificar_revision_no_completada(solicitud.prueba_id, fila, "aprender la zona")
     try:
         bbox = validar_bbox_normalizado(solicitud.bbox_norm)
     except ValueError as exc:
@@ -5197,33 +6863,88 @@ def aprender_zona_video(solicitud: SolicitudZonaVideo):
     from aprendizaje_video_airbag import (
         ErrorPersistenciaAprendizaje,
         guardar_zona_aprendida,
+        perfil_zona_aprendida,
         resumen_aprendizajes,
     )
     from video_airbag import analizar_video, consenso_videos
+    # R15.4 (MEDIUM-02): flujo de TRES etapas — (1) entrada corta al lock:
+    # CAS + ROI bajo exclusión; (2) análisis pesado FUERA del lock; (3)
+    # reentrada corta: CAS fresco + commit. La reserva de operación da 423
+    # inmediato a una operación concurrente incompatible sobre el mismo
+    # video. Si el CAS o el commit de la etapa 3 fallan, la ROI se COMPENSA
+    # (ALTO-02/HIGH-01: petición fallida ⇒ cero efectos persistentes).
+    recurso = str(ruta_local)
+    _reservar_operacion(recurso, "aprendizaje de ROI con reanálisis")
+    # R15.5 (P0): política transaccional común (coordinador multi-almacén).
+    tx = TransaccionMultiAlmacen("aprendizaje de ROI con reanálisis",
+                                 recurso=recurso)
     try:
-        perfil = guardar_zona_aprendida(
-            ruta_local, bbox, tipo_camara=solicitud.tipo_camara,
-            frame_index=solicitud.frame_index, usuario=solicitud.usuario)
-    except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
-    except ErrorPersistenciaAprendizaje as exc:
-        raise HTTPException(503, f"La ROI no se guardó: {exc}") from exc
-    try:
-        nuevo = analizar_video(ruta_local, CONFIG, usar_cache=False)
-    except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
-    # Conserva metadatos del inventario que no pertenecen al analizador.
-    conservar = {k: video_item.get(k) for k in ("id", "ruta_relativa", "carpeta_video") if k in video_item}
-    video_item.update(nuevo)
-    video_item.update(conservar)
-    consenso = consenso_videos(fila.get("videos") or [], CONFIG)
-    _aplicar_consenso_video_a_fila(fila, consenso)
-    datos["generado_en"] = datetime.now().isoformat(timespec="seconds")
-    escribir_json_seguro(RUTA_VALIDACION, datos, lanzar=True, compacto=True)
-    _cache.update({"mtime": None, "datos": None})
+        with _lock_documento():
+            datos_frescos = _leer_documento_disco()
+            _verificar_expected_revision(solicitud.expected_revision, datos_frescos,
+                                                    estricto=True)
+            fila_fresca, item_fresco = _localizar_fila_video(
+                datos_frescos, solicitud.prueba_id, solicitud.video_id)
+            _verificar_revision_no_completada(solicitud.prueba_id, fila_fresca,
+                                              "aprender la zona")
+            snapshot_zona = tx.capturar(
+                "zona aprendida",
+                lambda: perfil_zona_aprendida(ruta_local),
+                lambda estado: _restaurar_zona_aprendida(ruta_local, estado))
+            try:
+                perfil = guardar_zona_aprendida(
+                    ruta_local, bbox, tipo_camara=solicitud.tipo_camara,
+                    frame_index=solicitud.frame_index, usuario=solicitud.usuario)
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from exc
+            except ErrorPersistenciaAprendizaje as exc:
+                raise HTTPException(503, f"La ROI no se guardó: {exc}") from exc
+            tx.aplicado()  # la ROI nueva QUEDÓ persistida
+        # Etapa 2 — análisis pesado FUERA del lock documental.
+        try:
+            nuevo = analizar_video(ruta_local, CONFIG, usar_cache=False)
+        except ValueError as exc:
+            # Contrato existente: la ROI explícita del usuario se conserva
+            # (queda en aprendizajes con su historial) y el documento no se
+            # toca; el reanálisis puede reintentarse.
+            raise HTTPException(422, str(exc)) from exc
+        # Etapa 3 — reentrada corta: CAS fresco + commit.
+        with _lock_documento():
+            try:
+                datos_frescos = _leer_documento_disco()
+                _verificar_expected_revision(solicitud.expected_revision,
+                                             datos_frescos, estricto=True)
+                fila_fresca, item_fresco = _localizar_fila_video(
+                    datos_frescos, solicitud.prueba_id, solicitud.video_id)
+                _verificar_revision_no_completada(solicitud.prueba_id, fila_fresca,
+                                                  "aprender la zona")
+                # R15 (ALTA-06): mismo patrón que el reanálisis global — conservar
+                # metadatos de inventario Y datos humanos, clear(), cargar el nuevo
+                # resultado y reponer. Ningún campo obsoleto de la detección anterior
+                # sobrevive; ninguna revisión manual se pierde.
+                conservar = {k: item_fresco.get(k) for k in (
+                    "id", "ruta_relativa", "carpeta_video", "revision_manual",
+                    "ultima_zona_nacimiento") if item_fresco.get(k) is not None}
+                item_fresco.clear()
+                item_fresco.update(nuevo)
+                item_fresco.update(conservar)
+                consenso = consenso_videos(fila_fresca.get("videos") or [], CONFIG)
+                _aplicar_consenso_video_a_fila(fila_fresca, consenso)
+                revision_documento = _commit_documento(datos_frescos)
+            except BaseException as exc:
+                # R15.3 (ALTO-02) + R15.4: 409/commit fallido tras la ROI ⇒
+                # compensar; la compensación no enmascara el error original.
+                # R15.5 (P0/MEDIUM-05): vía coordinador — restauración
+                # VERIFICADA; doble fallo ⇒ estado inconsistente explícito y
+                # el mensaje nunca afirma «revertida» cuando no lo fue.
+                tx.fallar(exc)
+        tx.exito()
+    finally:
+        _liberar_operacion(recurso)
     resultado = {
-        "guardado": True, "perfil": perfil, "video": video_item,
+        "guardado": True, "perfil": perfil, "video": item_fresco,
         "consenso": consenso, "aprendizaje": resumen_aprendizajes(),
+        "revision_documento": revision_documento,
     }
     _regenerar_excel(resultado)
     return resultado
@@ -5242,9 +6963,12 @@ def revertir_zona_video(solicitud: SolicitudZonaRevertir):
        el snapshot se restaura (rollback, C4) y se informa con precisión.
     Revertir nunca destruye la ROI desplazada: también entra al historial.
     """
+    # R15 (ALTA-07): guard servidor autoritativo antes de cualquier efecto.
+    _guard_mutacion_video("revertir la zona")
     datos = _cargar_datos()
     if not datos:
         raise HTTPException(404, "Sin datos procesados.")
+    _verificar_expected_revision(solicitud.expected_revision, datos, estricto=True)
     fila = next((f for f in datos.get("resultados", []) if _id_fila(f) == solicitud.prueba_id), None)
     if fila is None:
         raise HTTPException(404, "No existe el ID solicitado.")
@@ -5255,85 +6979,115 @@ def revertir_zona_video(solicitud: SolicitudZonaRevertir):
     if raiz is None:
         raise HTTPException(503, "La raíz del lote no está disponible en este equipo.")
     ruta_local = _resolver_imagen(str(video_item.get("ruta") or ""), datos, raiz)
+    # R15 (ALTA-07): pre-chequeo de revisión completada ANTES de efectos
+    # persistentes; en el commit se revalida contra el documento fresco.
+    _verificar_revision_no_completada(solicitud.prueba_id, fila, "revertir la zona")
     from aprendizaje_video_airbag import (
         ErrorPersistenciaAprendizaje,
         historial_zona_aprendida,
         perfil_zona_aprendida,
-        restaurar_perfil_zona,
         revertir_zona_aprendida,
         resumen_aprendizajes,
     )
     from video_airbag import analizar_video, consenso_videos
 
-    # 1) Pre-chequeo de decodificación: fallar aquí no toca nada persistente.
-    if not Path(ruta_local).is_file():
-        raise HTTPException(404, "El archivo de video no está disponible en este equipo.")
+    # R15.4 (MEDIUM-02): misma reserva de recurso que aprender_zona_video;
+    # el análisis de la reversión también corre fuera del lock documental.
+    recurso = str(ruta_local)
+    _reservar_operacion(recurso, "reversión de ROI con reanálisis")
+    # R15.5 (P0): política transaccional común (coordinador multi-almacén).
+    tx = TransaccionMultiAlmacen("reversión de ROI con reanálisis",
+                                 recurso=recurso)
     try:
-        import cv2 as _cv2
-        cap = _cv2.VideoCapture(str(ruta_local))
+        # 1) Pre-chequeo de decodificación: fallar aquí no toca nada persistente.
+        if not Path(ruta_local).is_file():
+            raise HTTPException(404, "El archivo de video no está disponible en este equipo.")
         try:
-            ok, cuadro = cap.read()
-        finally:
-            cap.release()
-        if not ok or cuadro is None:
-            raise ValueError("No se pudo decodificar el primer cuadro del video.")
-    except ValueError as exc:
-        raise HTTPException(422, f"Reversión no iniciada: {exc}") from exc
-
-    # 2) Snapshot para rollback ANTES de mutar el aprendizaje.
-    snapshot = perfil_zona_aprendida(ruta_local)
-    historial_previo = historial_zona_aprendida(ruta_local)
-
-    # 3) Reversión con escritura verificada (C3).
-    try:
-        perfil = revertir_zona_aprendida(ruta_local, usuario=solicitud.usuario,
-                                         indice=solicitud.indice)
-    except ValueError as exc:
-        raise HTTPException(409, str(exc)) from exc
-    except ErrorPersistenciaAprendizaje as exc:
-        raise HTTPException(503, f"La ROI no cambió: {exc}") from exc
-
-    # 4) Reanálisis y persistencia de resultados; rollback ante cualquier fallo.
-    try:
-        nuevo = analizar_video(ruta_local, CONFIG, usar_cache=False)
-        conservar = {k: video_item.get(k) for k in ("id", "ruta_relativa", "carpeta_video") if k in video_item}
-        video_item.update(nuevo)
-        video_item.update(conservar)
-        consenso = consenso_videos(fila.get("videos") or [], CONFIG)
-        _aplicar_consenso_video_a_fila(fila, consenso)
-        datos["generado_en"] = datetime.now().isoformat(timespec="seconds")
-        escribir_json_seguro(RUTA_VALIDACION, datos, lanzar=True, compacto=True)
-    except HTTPException:
-        raise
-    except Exception as exc:  # noqa: BLE001 — rollback deliberado
-        restaurado = True
-        detalle_rollback = ""
-        if snapshot is not None:
+            import cv2 as _cv2
+            cap = _cv2.VideoCapture(str(ruta_local))
             try:
-                restaurar_perfil_zona(ruta_local, snapshot)
-            except Exception as exc2:  # noqa: BLE001
-                restaurado = False
-                detalle_rollback = f" Además, el rollback falló: {exc2}"
+                ok, cuadro = cap.read()
+            finally:
+                cap.release()
+            if not ok or cuadro is None:
+                raise ValueError("No se pudo decodificar el primer cuadro del video.")
+        except ValueError as exc:
+            raise HTTPException(422, f"Reversión no iniciada: {exc}") from exc
+
+        # 2) Snapshot para rollback ANTES de mutar el aprendizaje (R15.5 P0:
+        #    registrado en el coordinador con restauración verificada).
+        snapshot = tx.capturar(
+            "zona aprendida",
+            lambda: perfil_zona_aprendida(ruta_local),
+            lambda estado: _restaurar_zona_aprendida(ruta_local, estado))
+        historial_previo = historial_zona_aprendida(ruta_local)
+
+        # 3) Reversión con escritura verificada (C3).
+        try:
+            perfil = revertir_zona_aprendida(ruta_local, usuario=solicitud.usuario,
+                                             indice=solicitud.indice)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except ErrorPersistenciaAprendizaje as exc:
+            raise HTTPException(503, f"La ROI no cambió: {exc}") from exc
+        tx.aplicado()  # la reversión QUEDÓ persistida
+
+        # 4) Reanálisis y persistencia de resultados; rollback ante cualquier fallo.
+        #    R15 (ALTA-03 + MEDIA-14): el commit se hace sobre el documento MÁS
+        #    RECIENTE bajo lock, con CAS; si el commit se rechaza, la reversión
+        #    del aprendizaje también se deshace (nada queda a medias, C4).
+        # R15.5 (P0/MEDIUM-05): compensación VERIFICADA vía coordinador;
+        # doble fallo ⇒ estado inconsistente explícito + bloqueo del recurso,
+        # nunca «se deshizo» cuando no se deshizo.
+        try:
+            nuevo = analizar_video(ruta_local, CONFIG, usar_cache=False)
+            with _lock_documento():
+                datos_frescos = _leer_documento_disco()
+                _verificar_expected_revision(solicitud.expected_revision, datos_frescos,
+                                                    estricto=True)
+                fila_fresca, item_fresco = _localizar_fila_video(
+                    datos_frescos, solicitud.prueba_id, solicitud.video_id)
+                _verificar_revision_no_completada(solicitud.prueba_id, fila_fresca,
+                                                  "revertir la zona")
+                # R15 (ALTA-06): conservar metadatos de inventario Y datos
+                # humanos, clear(), cargar el nuevo resultado y reponer.
+                conservar = {k: item_fresco.get(k) for k in (
+                    "id", "ruta_relativa", "carpeta_video", "revision_manual",
+                    "ultima_zona_nacimiento") if item_fresco.get(k) is not None}
+                item_fresco.clear()
+                item_fresco.update(nuevo)
+                item_fresco.update(conservar)
+                consenso = consenso_videos(fila_fresca.get("videos") or [], CONFIG)
+                _aplicar_consenso_video_a_fila(fila_fresca, consenso)
+                revision_documento = _commit_documento(datos_frescos)
+        except BaseException as exc:
+            _cache.update({"mtime": None, "datos": None})
+            try:
+                tx.fallar(exc)
+            except HTTPException:
+                raise
+            except Exception:  # noqa: BLE001 — error original ya compensado
+                raise HTTPException(500, (
+                    f"La reversión se DESHIZO porque un paso posterior falló "
+                    f"({type(exc).__name__}: {exc}). Los efectos externos "
+                    "fueron restaurados; la solicitud no produjo efectos "
+                    "persistentes.")) from exc
+        tx.exito()
         _cache.update({"mtime": None, "datos": None})
-        if restaurado:
-            raise HTTPException(500, (
-                f"La reversión se DESHIZO porque un paso posterior falló "
-                f"({type(exc).__name__}: {exc}). La ROI activa sigue siendo la "
-                f"anterior a esta operación; nada quedó a medias.{detalle_rollback}")) from exc
-        raise HTTPException(500, (
-            f"Estado inconsistente tras fallo ({type(exc).__name__}: {exc}): la ROI se "
-            f"revirtió pero no se pudo restaurar el snapshot ni completar el análisis."
-            f" El historial de ROI sigue disponible para restaurar manualmente.{detalle_rollback}")) from exc
-    _cache.update({"mtime": None, "datos": None})
-    resultado = {
-        "revertido": True, "perfil": perfil, "video": video_item,
-        "consenso": consenso, "aprendizaje": resumen_aprendizajes(),
-        "historial_roi": historial_zona_aprendida(ruta_local),
-        "roi_anterior": list(historial_previo[0]["bbox_norm"]) if historial_previo else None,
-        "escritura_verificada": True,
-    }
-    _regenerar_excel(resultado)
-    return resultado
+        resultado = {
+            "revertido": True, "perfil": perfil, "video": item_fresco,
+            "consenso": consenso, "aprendizaje": resumen_aprendizajes(),
+            "historial_roi": historial_zona_aprendida(ruta_local),
+            "roi_anterior": list(historial_previo[0]["bbox_norm"]) if historial_previo else None,
+            "escritura_verificada": True,
+            "revision_documento": revision_documento,
+        }
+        _regenerar_excel(resultado)
+        return resultado
+
+
+    finally:
+        _liberar_operacion(recurso)
 
 
 @app.get("/api/imagen/orientada")
@@ -5774,8 +7528,9 @@ def editar_zona(solicitud: SolicitudZona):
     if not _zona_lock.acquire(blocking=False):
         raise HTTPException(409, "Hay otra zona en proceso. Espera a que termine.")
     try:
-        if _pipeline_hilo is not None and _pipeline_hilo.is_alive():
-            raise HTTPException(409, "Detén conservando el avance antes de editar zonas; pausar mantiene el hilo activo.")
+        # R15.6 (ALTO-08): guard uniforme — la reserva atómica del slot
+        # también bloquea (ventana entre admisión y arranque del hilo).
+        _assert_pipeline_inactivo("editar zonas")
         datos = _cargar_datos()
         fila = next((f for f in (datos or {}).get("resultados", [])
                      if _id_fila(f) == solicitud.prueba_id), None)
@@ -5801,158 +7556,194 @@ def editar_zona(solicitud: SolicitudZona):
             return {"firma": version, "bbox": solicitud.bbox}
         if solicitud.accion in ("guardar", "deshacer", "guardar_bloque") and solicitud.firma != version:
             raise HTTPException(409, "La imagen cambió. Vuelve a previsualizar la zona.")
-        if solicitud.accion == "guardar_bloque":
-            regiones = []
-            for r in solicitud.regiones:
-                validar_caja(r.bbox, ocr.get("dimensiones") or [])
-                pol_solicitado = getattr(r, "poligono", None)
-                pol = (_validar_poligono_recorte(pol_solicitado, ocr.get("dimensiones") or []).tolist()
-                       if pol_solicitado is not None else None)
-                regiones.append({"bbox": list(r.bbox), "texto": r.texto, "poligono": pol,
-                                 "orientacion_base": int(getattr(r, "orientacion_base", 0) or 0),
-                                 "ajuste": float(getattr(r, "ajuste", 0) or 0),
-                                 "variante": getattr(r, "variante", "auto"),
-                                 "tipo_esperado": getattr(r, "tipo_esperado", "auto")})
-            # Las anotaciones manuales viven en una capa independiente. Ajustar o
-            # dividir un bloque OCR no debe quedar bloqueado por una anotación que
-            # se superpone: se conserva intacta y no se fusiona con el bloque OCR.
-            anotaciones_superpuestas = [a for a in gestor.listar_anotaciones([ruta])
-                if any(interseca_region(r["bbox"], a.get("bbox"), r.get("poligono")) for r in regiones)]
-            with gestor._conectar() as con:
-                identificador = guardar_bloque(con, imagen_hash, ocr, solicitud.origen, regiones)
-            muestras, nuevas, duplicadas, advertencias = [], 0, 0, []
-            estrategias_guardadas = []
-            if hasattr(gestor, "registrar_muestra_visual"):
-                original = next((u for u in unidades(ocr) if list(u.get("bbox") or []) == list(solicitud.origen or [])), {})
-                contexto = {k: fila.get(k) for k in
-                            ("project_id", "tipo_st", "module_version", "temperature_condition", "inflator_type")}
-                contexto.update({"fase": item.get("fase")})
-                for indice, region in enumerate(regiones, 1):
+        # R15.6 (ALTO-11): las acciones de mutación y el estado de revisión
+        # quedan bajo el coordinador común; fallo de revisión ⇒ restauración
+        # verificada de la edición (cero efectos persistentes).
+        tx = None
+        if solicitud.accion in ("guardar", "deshacer", "guardar_bloque"):
+            _assert_recurso_consistente(f"carpeta:{solicitud.prueba_id}",
+                                        "editar la zona")
+            tx = TransaccionMultiAlmacen(
+                "edición de zona",
+                recurso=f"carpeta:{solicitud.prueba_id}")
+            tx.capturar(
+                "evidencias y estado de revisión",
+                lambda: gestor.snapshot_evidencias_imagen(
+                    ruta, caso_id=solicitud.prueba_id),
+                gestor.restaurar_evidencias_imagen)
+            tx.aplicado()  # las ramas siguientes SON el efecto
+        try:
+            if solicitud.accion == "guardar_bloque":
+                regiones = []
+                for r in solicitud.regiones:
+                    validar_caja(r.bbox, ocr.get("dimensiones") or [])
+                    pol_solicitado = getattr(r, "poligono", None)
+                    pol = (_validar_poligono_recorte(pol_solicitado, ocr.get("dimensiones") or []).tolist()
+                           if pol_solicitado is not None else None)
+                    regiones.append({"bbox": list(r.bbox), "texto": r.texto, "poligono": pol,
+                                     "orientacion_base": int(getattr(r, "orientacion_base", 0) or 0),
+                                     "ajuste": float(getattr(r, "ajuste", 0) or 0),
+                                     "variante": getattr(r, "variante", "auto"),
+                                     "tipo_esperado": getattr(r, "tipo_esperado", "auto")})
+                # Las anotaciones manuales viven en una capa independiente. Ajustar o
+                # dividir un bloque OCR no debe quedar bloqueado por una anotación que
+                # se superpone: se conserva intacta y no se fusiona con el bloque OCR.
+                anotaciones_superpuestas = [a for a in gestor.listar_anotaciones([ruta])
+                    if any(interseca_region(r["bbox"], a.get("bbox"), r.get("poligono")) for r in regiones)]
+                with gestor._conectar() as con:
+                    identificador = guardar_bloque(con, imagen_hash, ocr, solicitud.origen, regiones)
+                muestras, nuevas, duplicadas, advertencias = [], 0, 0, []
+                estrategias_guardadas = []
+                if hasattr(gestor, "registrar_muestra_visual"):
+                    original = next((u for u in unidades(ocr) if list(u.get("bbox") or []) == list(solicitud.origen or [])), {})
+                    contexto = {k: fila.get(k) for k in
+                                ("project_id", "tipo_st", "module_version", "temperature_condition", "inflator_type")}
+                    contexto.update({"fase": item.get("fase")})
+                    for indice, region in enumerate(regiones, 1):
+                        try:
+                            muestra = gestor.registrar_muestra_visual(
+                                ruta, _id_fila(fila), str(original.get("texto") or ""), region["texto"],
+                                region["bbox"], accion="confirmar_entrenar", entrenable=True,
+                                campo="division_bloque" if len(regiones) > 1 else "ajuste_bloque",
+                                fase=item.get("fase"), tor=item.get("tor"),
+                                modelo_origen=(item.get("resultado_ocr") or {}).get("modelo_visual_version")
+                                or (item.get("resultado_ocr") or {}).get("motor"), usuario="dashboard",
+                                metadatos={**contexto, "origen": "geometria_manual",
+                                           "edicion_zona_id": identificador, "region_indice": indice,
+                                           "poligono_lectura": region.get("poligono"),
+                                           "giro_foto": float((item.get("resultado_ocr") or {}).get("orientacion_texto_grados") or 0)})
+                            muestras.append(muestra)
+                            if muestra.get("duplicada"): duplicadas += 1
+                            else: nuevas += 1
+                        except ValueError as exc:
+                            advertencias.append(str(exc))
+                        try:
+                            if not hasattr(gestor, "registrar_estrategia_ocr"):
+                                continue
+                            estrategias_guardadas.append(gestor.registrar_estrategia_ocr(
+                                ruta, region["bbox"], ocr.get("dimensiones") or [],
+                                {"orientacion_base": region.get("orientacion_base", 0),
+                                 "ajuste_manual": region.get("ajuste", 0),
+                                 "variante": region.get("variante", "auto"),
+                                 "tipo_esperado": region.get("tipo_esperado", "auto"),
+                                 "texto_resultado": region["texto"], "origen": "geometria_manual"},
+                                caso_id=_id_fila(fila), contexto=contexto, usuario="dashboard"))
+                        except ValueError as exc:
+                            advertencias.append(str(exc))
+                auto_visual = (_programar_entrenamiento_visual_auto(
+                    f"Geometría confirmada: {solicitud.prueba_id}/{solicitud.imagen_id}")
+                    if nuevas > 0 else None)
+                resultado = {"guardado": True, "edicion_id": identificador,
+                             "entrenamiento": bool(muestras),
+                             "muestras_geometria": muestras, "muestras_nuevas": nuevas,
+                             "muestras_duplicadas": duplicadas, "estrategias": estrategias_guardadas,
+                             "aprendizaje_visual_automatico": auto_visual,
+                             "advertencias_entrenamiento": advertencias,
+                             "anotaciones_manual_preservadas": len(anotaciones_superpuestas)}
+            elif solicitud.accion == "deshacer":
+                with gestor._conectar() as con:
+                    cambio = deshacer(con, imagen_hash, ocr)
+                resultado = {"guardado": cambio}
+            else:
+                validar_caja(solicitud.bbox, ocr.get("dimensiones") or [])
+                poligono_solicitud = getattr(solicitud, "poligono", None)
+                poligono = (_validar_poligono_recorte(poligono_solicitud, ocr.get("dimensiones") or []).tolist()
+                            if poligono_solicitud is not None else None)
+                # Con geometría libre no expandimos la bbox: el cuadrilátero es la
+                # fuente de verdad y evita absorber texto vecino por su envolvente.
+                bbox = (list(solicitud.bbox) if poligono is not None
+                        else (solicitud.bbox if getattr(solicitud, "exacta", False) and solicitud.accion == "previsualizar"
+                              else expandir(solicitud.bbox, ocr)))
+                validar_caja(bbox, ocr.get("dimensiones") or [])
+                if (not getattr(solicitud, "exacta", False) and
+                        any(interseca_region(bbox, a.get("bbox"), poligono) for a in gestor.listar_anotaciones([ruta]))):
+                    raise HTTPException(409, "Esta unión incluye una anotación manual de texto omitido. Ajusta el área para excluirla o usa Ajustar / dividir bloque; la anotación manual se conserva por separado.")
+                afectadas = unidades_en_region(ocr, bbox, poligono)
+                anterior = "\n".join(str(u.get("texto", "")) for u in afectadas)
+                if solicitud.accion == "previsualizar":
+                    propuesta, orientacion = anterior, {}
+                    if solicitud.releer:
+                        import cv2
+                        from ocr_engine import cargar_imagen, obtener_motor, _leer_recorte_orientado
+                        foto = cargar_imagen(str(ruta))
+                        manual = float(ocr.get("rotacion_manual_aplicada_grados") or 0)
+                        prioritaria = bool(ocr.get("orientacion_manual_prioritaria"))
+                        giro = manual if prioritaria else manual + _orientacion_base_publica(ocr)
+                        foto = rotar_imagen_libre(foto, giro)
+                        ajuste = 0 if prioritaria else float(ocr.get("deskew_texto_aplicado_grados") or ocr.get("deskew_aplicado_grados") or 0)
+                        alto, ancho = foto.shape[:2]
+                        if abs(ajuste) >= .05:
+                            matriz = cv2.getRotationMatrix2D((ancho/2, alto/2), ajuste, 1)
+                            foto = cv2.warpAffine(foto, matriz, (ancho, alto), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+                        if [ancho, alto] != list(ocr.get("dimensiones") or []):
+                            raise HTTPException(409, "El marco de la imagen cambió; reprocesa esta imagen antes de releer regiones.")
+                        x,y,w,h = bbox
+                        if poligono is None:
+                            recorte = foto[y:y+h, x:x+w]
+                        else:
+                            recorte = _recortar_region_revisada(foto, bbox, poligono)
+                        rh, rw = recorte.shape[:2]
+                        escala = min(3.0, max(1.0, 160/min(rw,rh)), 2400/max(rw,rh))
+                        if abs(escala-1) > .01:
+                            recorte = cv2.resize(recorte, None, fx=escala, fy=escala, interpolation=cv2.INTER_CUBIC)
+                        motor, _ = obtener_motor(CONFIG)
+                        lecturas, orientacion = _leer_recorte_orientado(recorte, motor)
+                        propuesta = "\n".join(str(u.get("texto", "")) for u in lecturas)
+                    return {"bbox": bbox, "poligono": poligono, "anterior": anterior, "texto": propuesta,
+                            "bloques": len(afectadas), "firma": version, **orientacion}
+                if list(bbox) != solicitud.bbox:
+                    raise HTTPException(409, "La selección cambió. Previsualiza otra vez antes de confirmar.")
+                with gestor._conectar() as con:
+                    identificador = guardar(con, imagen_hash, ocr, bbox, solicitud.texto, poligono=poligono)
+                aprendizaje_union = None
+                auto_visual = None
+                advertencia_entrenamiento = None
+                if hasattr(gestor, "registrar_union_visual"):
                     try:
-                        muestra = gestor.registrar_muestra_visual(
-                            ruta, _id_fila(fila), str(original.get("texto") or ""), region["texto"],
-                            region["bbox"], accion="confirmar_entrenar", entrenable=True,
-                            campo="division_bloque" if len(regiones) > 1 else "ajuste_bloque",
-                            fase=item.get("fase"), tor=item.get("tor"),
+                        aprendizaje_union = gestor.registrar_union_visual(
+                            ruta, _id_fila(fila), solicitud.texto, bbox,
+                            unidades_originales=afectadas, poligono=poligono, fase=item.get("fase"), tor=item.get("tor"),
                             modelo_origen=(item.get("resultado_ocr") or {}).get("modelo_visual_version")
-                            or (item.get("resultado_ocr") or {}).get("motor"), usuario="dashboard",
-                            metadatos={**contexto, "origen": "geometria_manual",
-                                       "edicion_zona_id": identificador, "region_indice": indice,
-                                       "poligono_lectura": region.get("poligono"),
+                            or (item.get("resultado_ocr") or {}).get("motor"),
+                            usuario="dashboard",
+                            metadatos={**{k: fila.get(k) for k in
+                                       ("tipo_st", "module_version", "temperature_condition", "inflator_type")},
+                                       "edicion_zona_id": identificador,
                                        "giro_foto": float((item.get("resultado_ocr") or {}).get("orientacion_texto_grados") or 0)})
-                        muestras.append(muestra)
-                        if muestra.get("duplicada"): duplicadas += 1
-                        else: nuevas += 1
+                        if int(aprendizaje_union.get("nuevas") or 0) > 0:
+                            auto_visual = _programar_entrenamiento_visual_auto(
+                                f"Unión confirmada: {solicitud.prueba_id}/{solicitud.imagen_id}")
                     except ValueError as exc:
-                        advertencias.append(str(exc))
-                    try:
-                        if not hasattr(gestor, "registrar_estrategia_ocr"):
-                            continue
-                        estrategias_guardadas.append(gestor.registrar_estrategia_ocr(
-                            ruta, region["bbox"], ocr.get("dimensiones") or [],
-                            {"orientacion_base": region.get("orientacion_base", 0),
-                             "ajuste_manual": region.get("ajuste", 0),
-                             "variante": region.get("variante", "auto"),
-                             "tipo_esperado": region.get("tipo_esperado", "auto"),
-                             "texto_resultado": region["texto"], "origen": "geometria_manual"},
-                            caso_id=_id_fila(fila), contexto=contexto, usuario="dashboard"))
-                    except ValueError as exc:
-                        advertencias.append(str(exc))
-            auto_visual = (_programar_entrenamiento_visual_auto(
-                f"Geometría confirmada: {solicitud.prueba_id}/{solicitud.imagen_id}")
-                if nuevas > 0 else None)
-            resultado = {"guardado": True, "edicion_id": identificador,
-                         "entrenamiento": bool(muestras),
-                         "muestras_geometria": muestras, "muestras_nuevas": nuevas,
-                         "muestras_duplicadas": duplicadas, "estrategias": estrategias_guardadas,
-                         "aprendizaje_visual_automatico": auto_visual,
-                         "advertencias_entrenamiento": advertencias,
-                         "anotaciones_manual_preservadas": len(anotaciones_superpuestas)}
-        elif solicitud.accion == "deshacer":
-            with gestor._conectar() as con:
-                cambio = deshacer(con, imagen_hash, ocr)
-            resultado = {"guardado": cambio}
-        else:
-            validar_caja(solicitud.bbox, ocr.get("dimensiones") or [])
-            poligono_solicitud = getattr(solicitud, "poligono", None)
-            poligono = (_validar_poligono_recorte(poligono_solicitud, ocr.get("dimensiones") or []).tolist()
-                        if poligono_solicitud is not None else None)
-            # Con geometría libre no expandimos la bbox: el cuadrilátero es la
-            # fuente de verdad y evita absorber texto vecino por su envolvente.
-            bbox = (list(solicitud.bbox) if poligono is not None
-                    else (solicitud.bbox if getattr(solicitud, "exacta", False) and solicitud.accion == "previsualizar"
-                          else expandir(solicitud.bbox, ocr)))
-            validar_caja(bbox, ocr.get("dimensiones") or [])
-            if (not getattr(solicitud, "exacta", False) and
-                    any(interseca_region(bbox, a.get("bbox"), poligono) for a in gestor.listar_anotaciones([ruta]))):
-                raise HTTPException(409, "Esta unión incluye una anotación manual de texto omitido. Ajusta el área para excluirla o usa Ajustar / dividir bloque; la anotación manual se conserva por separado.")
-            afectadas = unidades_en_region(ocr, bbox, poligono)
-            anterior = "\n".join(str(u.get("texto", "")) for u in afectadas)
-            if solicitud.accion == "previsualizar":
-                propuesta, orientacion = anterior, {}
-                if solicitud.releer:
-                    import cv2
-                    from ocr_engine import cargar_imagen, obtener_motor, _leer_recorte_orientado
-                    foto = cargar_imagen(str(ruta))
-                    manual = float(ocr.get("rotacion_manual_aplicada_grados") or 0)
-                    prioritaria = bool(ocr.get("orientacion_manual_prioritaria"))
-                    giro = manual if prioritaria else manual + _orientacion_base_publica(ocr)
-                    foto = rotar_imagen_libre(foto, giro)
-                    ajuste = 0 if prioritaria else float(ocr.get("deskew_texto_aplicado_grados") or ocr.get("deskew_aplicado_grados") or 0)
-                    alto, ancho = foto.shape[:2]
-                    if abs(ajuste) >= .05:
-                        matriz = cv2.getRotationMatrix2D((ancho/2, alto/2), ajuste, 1)
-                        foto = cv2.warpAffine(foto, matriz, (ancho, alto), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
-                    if [ancho, alto] != list(ocr.get("dimensiones") or []):
-                        raise HTTPException(409, "El marco de la imagen cambió; reprocesa esta imagen antes de releer regiones.")
-                    x,y,w,h = bbox
-                    if poligono is None:
-                        recorte = foto[y:y+h, x:x+w]
-                    else:
-                        recorte = _recortar_region_revisada(foto, bbox, poligono)
-                    rh, rw = recorte.shape[:2]
-                    escala = min(3.0, max(1.0, 160/min(rw,rh)), 2400/max(rw,rh))
-                    if abs(escala-1) > .01:
-                        recorte = cv2.resize(recorte, None, fx=escala, fy=escala, interpolation=cv2.INTER_CUBIC)
-                    motor, _ = obtener_motor(CONFIG)
-                    lecturas, orientacion = _leer_recorte_orientado(recorte, motor)
-                    propuesta = "\n".join(str(u.get("texto", "")) for u in lecturas)
-                return {"bbox": bbox, "poligono": poligono, "anterior": anterior, "texto": propuesta,
-                        "bloques": len(afectadas), "firma": version, **orientacion}
-            if list(bbox) != solicitud.bbox:
-                raise HTTPException(409, "La selección cambió. Previsualiza otra vez antes de confirmar.")
-            with gestor._conectar() as con:
-                identificador = guardar(con, imagen_hash, ocr, bbox, solicitud.texto, poligono=poligono)
-            aprendizaje_union = None
-            auto_visual = None
-            advertencia_entrenamiento = None
-            if hasattr(gestor, "registrar_union_visual"):
-                try:
-                    aprendizaje_union = gestor.registrar_union_visual(
-                        ruta, _id_fila(fila), solicitud.texto, bbox,
-                        unidades_originales=afectadas, poligono=poligono, fase=item.get("fase"), tor=item.get("tor"),
-                        modelo_origen=(item.get("resultado_ocr") or {}).get("modelo_visual_version")
-                        or (item.get("resultado_ocr") or {}).get("motor"),
-                        usuario="dashboard",
-                        metadatos={**{k: fila.get(k) for k in
-                                   ("tipo_st", "module_version", "temperature_condition", "inflator_type")},
-                                   "edicion_zona_id": identificador,
-                                   "giro_foto": float((item.get("resultado_ocr") or {}).get("orientacion_texto_grados") or 0)})
-                    if int(aprendizaje_union.get("nuevas") or 0) > 0:
-                        auto_visual = _programar_entrenamiento_visual_auto(
-                            f"Unión confirmada: {solicitud.prueba_id}/{solicitud.imagen_id}")
-                except ValueError as exc:
-                    # La edición humana es prioritaria: si el recorte visual no
-                    # puede crearse, la unión sigue guardada y se informa aparte.
-                    advertencia_entrenamiento = str(exc)
-            resultado = {
-                "guardado": True, "edicion_id": identificador,
-                "entrenamiento": bool(aprendizaje_union and aprendizaje_union.get("muestras")),
-                "aprendizaje_union": aprendizaje_union,
-                "aprendizaje_visual_automatico": auto_visual,
-                "advertencia_entrenamiento": advertencia_entrenamiento,
-            }
-        gestor.actualizar_revision("carpeta", solicitud.prueba_id, estado="parcial")
+                        # La edición humana es prioritaria: si el recorte visual no
+                        # puede crearse, la unión sigue guardada y se informa aparte.
+                        advertencia_entrenamiento = str(exc)
+                resultado = {
+                    "guardado": True, "edicion_id": identificador,
+                    "entrenamiento": bool(aprendizaje_union and aprendizaje_union.get("muestras")),
+                    "aprendizaje_union": aprendizaje_union,
+                    "aprendizaje_visual_automatico": auto_visual,
+                    "advertencia_entrenamiento": advertencia_entrenamiento,
+                }
+            if tx is not None:
+                gestor.actualizar_revision("carpeta", solicitud.prueba_id,
+                                           estado="parcial")
+        except BaseException as exc:
+            if tx is None:
+                raise
+            try:
+                tx.fallar(exc)
+            except HTTPException:
+                raise
+            except ValueError as vexc:
+                raise HTTPException(400, str(vexc)) from vexc
+            except Exception:  # noqa: BLE001 — fallo de almacén, compensado
+                raise HTTPException(503, (
+                    "No se pudo completar 'edición de zona' "
+                    f"({type(exc).__name__}: {exc}). Los efectos externos "
+                    "fueron restaurados; la solicitud no produjo efectos "
+                    "persistentes.")) from exc
+        if tx is not None:
+            tx.exito()
         _regenerar_excel(resultado)
         return resultado
     except ValueError as exc:

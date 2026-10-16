@@ -346,10 +346,15 @@ def resolver_apertura(fila: dict | None) -> dict:
         secuencia_item = item.get("secuencia_despliegue_r13") if isinstance(item.get("secuencia_despliegue_r13"), dict) else {}
         tiempo_max_item = _milisegundos(secuencia_item.get("tiempo_max_inflado_ms"))
         duracion_max_item = _milisegundos(secuencia_item.get("duracion_expansion_ms"))
+        # R15.1 (MEDIO-09): se recoge toda evidencia con frame de máximo
+        # (incluida la censurada de 0 ms, por auditabilidad), etiquetada con
+        # el estado de la secuencia; la métrica confirmada del caso sólo se
+        # calcula sobre estado == "maximo_inflado_estimado".
         if (secuencia_item.get("frame_max_inflado") is not None
-                and tiempo_max_item is not None and tiempo_max_item > 0):
+                and tiempo_max_item is not None and tiempo_max_item >= 0):
             max_inflado_estimaciones.append({
                 "video": item.get("id") or item.get("nombre"),
+                "estado_secuencia": str(secuencia_item.get("estado") or "sin_estado"),
                 "frame_breakout": secuencia_item.get("frame_breakout"),
                 "frame_max_inflado": secuencia_item.get("frame_max_inflado"),
                 "tiempo_max_inflado_ms": tiempo_max_item,
@@ -674,10 +679,18 @@ def resolver_apertura(fila: dict | None) -> dict:
         tolerancia_llenado = 0.5
         conflicto_llenado = False
 
-    max_tiempos = sorted(float(x["tiempo_max_inflado_ms"]) for x in max_inflado_estimaciones
+    # R15.1 (MEDIO-09): agregación separada por estado explícito; nunca se
+    # mezcla un máximo no confirmado en la mediana confirmada del caso.
+    max_inflado_confirmadas = [x for x in max_inflado_estimaciones
+                               if x.get("estado_secuencia") == "maximo_inflado_estimado"]
+    max_inflado_no_confirmadas = [x for x in max_inflado_estimaciones
+                                  if x.get("estado_secuencia") == "maximo_visible_observado_no_confirmado"]
+    max_tiempos = sorted(float(x["tiempo_max_inflado_ms"]) for x in max_inflado_confirmadas
                          if _milisegundos(x.get("tiempo_max_inflado_ms")) is not None)
-    max_duraciones = sorted(float(x["duracion_expansion_ms"]) for x in max_inflado_estimaciones
+    max_duraciones = sorted(float(x["duracion_expansion_ms"]) for x in max_inflado_confirmadas
                             if _milisegundos(x.get("duracion_expansion_ms")) is not None)
+    max_tiempos_nc = sorted(float(x["tiempo_max_inflado_ms"]) for x in max_inflado_no_confirmadas
+                            if _milisegundos(x.get("tiempo_max_inflado_ms")) is not None)
     def _mediana(lista):
         if not lista:
             return None
@@ -685,6 +698,15 @@ def resolver_apertura(fila: dict | None) -> dict:
         return lista[m] if len(lista)%2 else (lista[m-1]+lista[m])/2.0
     tiempo_max_inflado_estimado = _mediana(max_tiempos)
     duracion_hasta_max_inflado = _mediana(max_duraciones)
+    tiempo_max_inflado_no_confirmado = _mediana(max_tiempos_nc)
+    if max_inflado_confirmadas:
+        max_inflado_estado_caso = "maximo_inflado_estimado"
+    elif max_inflado_no_confirmadas:
+        max_inflado_estado_caso = "maximo_visible_observado_no_confirmado"
+    elif max_inflado_estimaciones:
+        max_inflado_estado_caso = "sin_maximo_defendible"
+    else:
+        max_inflado_estado_caso = None
     tolerancia_max = max(0.5, (duracion_hasta_max_inflado or 0.0) * 0.25)
     conflicto_max_inflado = bool(len(max_tiempos) > 1 and (max(max_tiempos)-min(max_tiempos)) > tolerancia_max)
     anomalias_max_inflado = list(dict.fromkeys(
@@ -916,7 +938,11 @@ def resolver_apertura(fila: dict | None) -> dict:
                                              if tiempo_max_inflado_estimado is not None and not conflicto_max_inflado else None),
         "duracion_hasta_max_inflado_ms": (round(float(duracion_hasta_max_inflado), 3)
                                            if duracion_hasta_max_inflado is not None and not conflicto_max_inflado else None),
-        "max_inflado_soporte": len(max_inflado_estimaciones),
+        "tiempo_max_inflado_no_confirmado_ms": (round(float(tiempo_max_inflado_no_confirmado), 3)
+                                                if tiempo_max_inflado_no_confirmado is not None else None),
+        "max_inflado_estado": max_inflado_estado_caso,
+        "max_inflado_soporte": len(max_inflado_confirmadas),
+        "max_inflado_no_confirmado_soporte": len(max_inflado_no_confirmadas),
         "max_inflado_conflicto": conflicto_max_inflado,
         "max_inflado_anomalias": anomalias_max_inflado,
         "max_inflado_evidencias": max_inflado_estimaciones[:8],

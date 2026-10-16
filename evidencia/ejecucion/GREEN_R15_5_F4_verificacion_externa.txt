@@ -1,0 +1,17 @@
+=== GREEN R15.5 F4 — verificar (HIGH-03) + externa sin-datos (MEDIUM-04) ===
+Fecha: 2026-10-16 15:35 UTC · commit: 922e8b3 (F1-F4 consolidado)
+
+--- RED (previo al fix): 4 failed / 2 passed ---
+FAILED test_verificar_fallo_revision_no_toca_documento (repro HIGH-03)
+FAILED test_externa_sin_datos_fallo_json_restaura_sqlite (repro MEDIUM-04)
+FAILED test_externa_sin_datos_exito_json_y_sqlite_coherentes (asserts finales)
+FAILED test_restaurar_con_texto_fallo_revision_no_toca_documento (política uniforme)
+
+.........                                                                [100%]
+9 passed in 0.85s
+
+--- Regresión dirigida (76) ---
+76 passed in 9.62s
+
+--- Suite completa ---
+1010 passed, 0 failed (×2 pasadas, ~150s c/u) · node 38/38 · sin contaminación

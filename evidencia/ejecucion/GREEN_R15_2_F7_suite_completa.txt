@@ -1,0 +1,9 @@
+=== R15.2 F7 — SUITE COMPLETA (árbol dev final, tras docs) ===
+Fecha: 2026-10-15T20:56:58+00:00 · Commit: 3d7a4ef
+
+$ PYTHONPATH=pruebas:. python -m pytest pruebas/ -q
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+935 passed, 1 warning in 129.89s (0:02:09)
+
+Loop node:
+node cjs: 37/37 OK

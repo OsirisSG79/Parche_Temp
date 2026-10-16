@@ -1,0 +1,4 @@
+=== GREEN R15.6 F1 — helper único de efectos humanos (CRÍTICO-01 + MEDIO-06) ===
+Fecha: 2026-10-16 19:25 UTC · batería re-ejecutada en HEAD 7daa923 (commit F1: 218ea89, suite completa entonces 1018 passed / 0 failed)
+
+18 passed in 0.69s

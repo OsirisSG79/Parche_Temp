@@ -1,0 +1,51 @@
+=== R15.1 FASE 5 — EVIDENCIA DE EMPAQUETADO Y SIMULACIONES DE INSTALACIÓN ===
+Fecha: 2026-10-15
+Árbol de desarrollo: r15-repo @ 17f830d (Fase 5 + pin de caché r15.1)
+Nota: el SHA-256 del ZIP final se reporta en el mensaje de entrega (este log
+viaja DENTRO del ZIP; precedentes R15 idéntico — GREEN_R15_FASE9 no se
+autocontiene).
+
+--- Build (misma receta que R15, identidad r15.1) ---
+payload: 93 archivos (= manifiesto R15 (83) + VERSION.txt + 4 docs/pruebas
+  nuevas R15.1 + test_restaurar_texto_unittest.py + 4 pruebas r15_1..r15_4)
+patch acumulado V-MATRIX_R15_1.patch (git diff 69b1900..HEAD): 7383 líneas
+stage: 130 archivos + evidencia/ejecucion + skills (6) + verificadores
+MANIFEST_SHA256_R15_1.txt: 93 entradas (incluye VERSION.txt — ALTO-05)
+ZIP: V-Matrix-V15.10.1-R15_1_20261015.zip (147 entradas con directorios)
+
+--- Verificación desde dentro del paquete extraído ---
+$ sh verificar_sha256.sh  → SHA256SUMS OK (todas las entradas)
+manifiesto verificado hash a hash: 93/93 archivos
+VERSION.txt = 15.10.1-r15.1 ✓ (postflight del instalador lo exige)
+
+--- Simulación A: instalación LIMPIA (criterio de liberación) ---
+Base: git clone r15-repo @ 69b1900 (V15.9.10 + overlay R14) sin .git
++ verificación hash a hash del manifiesto contra el ZIP + copy2 del payload
++ réplica de Relocate-LegacyRootDocs (README_R14.md raíz retirado por dedup
+  registrado) + chmod 755 *.command
+Raíz .md resultante: ['AGENTS.md', 'README.md'] ✓
+Suite: 874 passed, 13 skipped, 0 failed (101.26 s)
+  (13 skips = 5 test_v15_10_1_r15_instalador + 7 test_v15_10_1_r15_4 +
+   1 skip de plataforma heredado; los instaladores sólo existen en la raíz
+   del ZIP distribuible, igual que en R15: 854/0/6 entonces)
+Node: 36/36 OK
+
+--- Simulación B: instalación USADA (Fase 5.3 del plan del auditor) ---
+Ídem A + sembrado de estado de uso real:
+  .cache_ocr/estado_pipeline.json = {"estado":"completado",...}  (escenario
+    BAJO-11: checkpoint previo de una instalación usada)
+  validacion_resultados.json raíz = documento versionado revision_documento=7
+Suite: 874 passed, 13 skipped, 0 failed (102.52 s) — SIN falsos rojos
+Node: 36/36 OK
+Conclusión: la suite es hermética sobre instalación usada (BAJO-11 cerrado);
+el resultado no depende del checkpoint previo.
+
+--- Suite de desarrollo (árbol completo exacto) ---
+887 passed / 0 failed (Python 3.13.16, pytest 9.0.3) · node 36/36
+(corrida tras Fase 4 en GREEN_R15_1_FASES2_3... y recorte post-Fase 4:
+ '887 passed, 1 warning in 100.23s')
+
+--- Pendiente de campo (sin Windows/pwsh/GPU/AVI reales en el sandbox) ---
+1. Ejecución real de INSTALAR_R15_1 en Windows con fallo inducido (rollback).
+2. Navegador real (MEDIO-07, badge NO CONFIRMADO).
+3. AVI reales + GPU Windows (doctrina N17).

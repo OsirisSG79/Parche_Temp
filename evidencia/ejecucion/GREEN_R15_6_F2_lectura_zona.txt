@@ -1,0 +1,10 @@
+=== GREEN R15.6 F2 — corregir_lectura + editar_zona bajo TransaccionMultiAlmacen ===
+Fecha: 2026-10-16 18:11 UTC · HEAD: 981453a (R15.6-F2: corregir_lectura (todas sus ramas, incluid...)
+
+--- Batería F2 + arneses AST adaptados ---
+20 passed in 1.85s
+
+--- Suite completa en HEAD exacto ---
+1024 passed, 1 warning in 162.09s (0:02:42)
+
+Sin contaminación: .cache_ocr/estado_inconsistente.json no existe tras la suite

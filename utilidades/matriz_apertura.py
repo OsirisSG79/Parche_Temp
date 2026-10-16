@@ -413,6 +413,8 @@ def celda_caso(fila: dict, criterio: dict) -> dict:
         "max_inflado_soporte": apertura.get("max_inflado_soporte") if apertura else None,
         "max_inflado_conflicto": bool(apertura.get("max_inflado_conflicto")) if apertura else False,
         "max_inflado_anomalias": list(apertura.get("max_inflado_anomalias") or []) if apertura else [],
+        "max_inflado_estado": apertura.get("max_inflado_estado") if apertura else None,
+        "tiempo_max_inflado_no_confirmado_ms": apertura.get("tiempo_max_inflado_no_confirmado_ms") if apertura else None,
         "tiempo_es_estimado": bool(decision_apertura == "PROPUESTA" and apertura.get("auto_color_elegible") is True and not es_gris),
         "color_fuente": ("estimacion_automatica_estandar_r11"
                          if decision_apertura == "PROPUESTA" and apertura.get("auto_color_elegible") is True and not es_gris

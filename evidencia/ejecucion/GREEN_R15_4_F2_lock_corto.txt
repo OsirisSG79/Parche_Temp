@@ -1,0 +1,20 @@
+=== GREEN R15.4 F2 — lock documental corto + reserva de operación (MEDIUM-02) ===
+Fecha: 2026-10-16 02:43 UTC
+
+--- Pruebas nuevas ---
+collecting ... collected 5 items
+
+pruebas/test_v15_10_1_r154_lock_corto.py::test_analisis_pesado_no_bloquea_el_lock_documento PASSED [ 20%]
+pruebas/test_v15_10_1_r154_lock_corto.py::test_operacion_concurrente_mismo_video_423_inmediato PASSED [ 40%]
+pruebas/test_v15_10_1_r154_lock_corto.py::test_cas_durante_analisis_409_y_roi_compensada PASSED [ 60%]
+pruebas/test_v15_10_1_r154_lock_corto.py::test_analisis_422_conserva_roi_y_libera_reserva PASSED [ 80%]
+pruebas/test_v15_10_1_r154_lock_corto.py::test_revertir_tambien_reserva_el_recurso PASSED [100%]
+
+============================== 5 passed in 5.36s ===============================
+
+--- Regresión dirigida ---
+42 passed in 9.35s
+
+--- Suite completa ---
+980 passed, 0 failed (138.58s)
+node: 37/37

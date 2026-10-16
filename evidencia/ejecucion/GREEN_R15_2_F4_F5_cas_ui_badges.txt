@@ -1,0 +1,12 @@
+=== R15.2 F4+F5 — EVIDENCIA GREEN (ALTO-04 + MEDIO-05) ===
+Fecha: 2026-10-15T20:50:40+00:00 · Commit: 050a71c
+
+$ PYTHONPATH=pruebas:. python -m pytest pruebas/test_v15_10_1_r152_cas_ui.py pruebas/test_v15_10_1_r15_1_documento_global.py pruebas/test_restaurar_texto_unittest.py -q
+.................................                                        [100%]
+33 passed in 0.99s
+
+$ node pruebas/test_v15_10_1_r152_ui_cas_y_badges.cjs
+OK R15.2 UI: insignias renderizadas sin etiquetas literales + CAS cableado
+
+Loop node completo:
+node cjs: 37/37 OK (sobre árbol r15.2, identidad 15.10.1-r15.2)

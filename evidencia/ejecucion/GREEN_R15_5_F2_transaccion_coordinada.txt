@@ -1,0 +1,19 @@
+=== GREEN R15.5 F2 — coordinador multi-almacén + doble fallo (P0/MEDIUM-05) ===
+Fecha: 2026-10-16 15:00 UTC
+
+collecting ... collected 6 items
+
+pruebas/test_v15_10_1_r155_transaccion_coordinada.py::test_aprender_doble_fallo_no_afirma_revertido PASSED [ 16%]
+pruebas/test_v15_10_1_r155_transaccion_coordinada.py::test_revisar_video_doble_fallo_declara_inconsistente PASSED [ 33%]
+pruebas/test_v15_10_1_r155_transaccion_coordinada.py::test_revertir_doble_fallo_declara_inconsistente PASSED [ 50%]
+pruebas/test_v15_10_1_r155_transaccion_coordinada.py::test_doble_fallo_bloquea_recurso_hasta_resolucion PASSED [ 66%]
+pruebas/test_v15_10_1_r155_transaccion_coordinada.py::test_fallo_simple_compensado_no_bloquea PASSED [ 83%]
+pruebas/test_v15_10_1_r155_transaccion_coordinada.py::test_registro_inconsistencia_persiste_y_se_resuelve PASSED [100%]
+
+============================== 6 passed in 0.59s ===============================
+
+--- Regresión directa (persistencia durable + C1-C7 + compensación R15.4 + lock corto + CAS efectos + post-commit) ---
+59 passed in 15.71s
+
+--- Suite completa ---
+1000 passed, 0 failed (150.97s) · node 38/38 · sin contaminación de .cache_ocr

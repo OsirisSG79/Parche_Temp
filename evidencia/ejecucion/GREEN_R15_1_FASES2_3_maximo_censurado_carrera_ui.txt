@@ -1,0 +1,51 @@
+=== R15.1 FASES 2+3 — EVIDENCIA GREEN (ALTO-06 + MEDIO-09 + MEDIO-07) ===
+Fecha: 2026-10-15T17:23:43+00:00
+
+--- Python: Fase 2 (nuevas) + regresiones directas ---
+$ PYTHONPATH=. python -m pytest pruebas/test_v15_10_1_r15_2_maximo_censurado.py pruebas/test_v15_10_1_r13_breakout_maximo.py pruebas/test_v15_10_1_r15_tmax_causal.py -v
+configfile: pytest.ini
+plugins: anyio-4.15.1, platformdirs-4.12.3
+collecting ... collected 26 items
+
+pruebas/test_v15_10_1_r15_2_maximo_censurado.py::test_evento_plano_en_frame0_nunca_publica_estimado_con_duracion_cero[areas0] PASSED [  3%]
+pruebas/test_v15_10_1_r15_2_maximo_censurado.py::test_evento_plano_en_frame0_nunca_publica_estimado_con_duracion_cero[areas1] PASSED [  7%]
+pruebas/test_v15_10_1_r15_2_maximo_censurado.py::test_evento_plano_en_frame0_nunca_publica_estimado_con_duracion_cero[areas2] PASSED [ 11%]
+pruebas/test_v15_10_1_r15_2_maximo_censurado.py::test_frame0_con_area_cercana_al_pico_se_degrada_a_no_confirmado PASSED [ 15%]
+pruebas/test_v15_10_1_r15_2_maximo_censurado.py::test_crecimiento_observado_desde_frame0_mantiene_estimado PASSED [ 19%]
+pruebas/test_v15_10_1_r15_2_maximo_censurado.py::test_breakout_interior_no_anade_censura PASSED [ 23%]
+pruebas/test_v15_10_1_r15_2_maximo_censurado.py::test_video_airbag_expone_estado_del_maximo_por_video PASSED [ 26%]
+pruebas/test_v15_10_1_r15_2_maximo_censurado.py::test_caso_separa_confirmados_de_no_confirmados PASSED [ 30%]
+pruebas/test_v15_10_1_r15_2_maximo_censurado.py::test_caso_sin_confirmados_no_publica_estimado PASSED [ 34%]
+pruebas/test_v15_10_1_r15_2_maximo_censurado.py::test_caso_con_censura_en_frame0_no_superficia_metrica PASSED [ 38%]
+pruebas/test_v15_10_1_r15_2_maximo_censurado.py::test_excel_publica_estado_maximo_inflado PASSED [ 42%]
+pruebas/test_v15_10_1_r13_breakout_maximo.py::test_secuencia_r13_breakout_y_maximo_a_5000fps PASSED [ 46%]
+pruebas/test_v15_10_1_r13_breakout_maximo.py::test_maximo_en_borde_clip_se_reporta_como_anomalia PASSED [ 50%]
+pruebas/test_v15_10_1_r13_breakout_maximo.py::test_un_video_defendible_pinta_sin_confirmacion_humana PASSED [ 53%]
+pruebas/test_v15_10_1_r13_breakout_maximo.py::test_conflicto_entre_dos_videos_defendibles_se_abstiene_de_color PASSED [ 57%]
+pruebas/test_v15_10_1_r13_breakout_maximo.py::test_ruta_temporal_sin_dic_puede_ser_alta_si_crece_y_tiene_dos_senales PASSED [ 61%]
+pruebas/test_v15_10_1_r13_breakout_maximo.py::test_pixel_aislado_sin_crecimiento_no_es_auto_colorable PASSED [ 65%]
+pruebas/test_v15_10_1_r13_breakout_maximo.py::test_area_bolsa_amplia_crece_aunque_breakout_use_contorno_local PASSED [ 69%]
+pruebas/test_v15_10_1_r13_breakout_maximo.py::test_excel_apertura_expone_maximo_automatico_sin_mover_columnas_legacy PASSED [ 73%]
+pruebas/test_v15_10_1_r15_tmax_causal.py::test_salto_inmediato_no_coloca_maximo_en_breakout PASSED [ 76%]
+pruebas/test_v15_10_1_r15_tmax_causal.py::test_variante_1_99_100_mantiene_orden_de_fases PASSED [ 80%]
+pruebas/test_v15_10_1_r15_tmax_causal.py::test_crecimiento_monotono_suave_sin_maximo_en_breakout PASSED [ 84%]
+pruebas/test_v15_10_1_r15_tmax_causal.py::test_clip_creciente_hasta_el_final_no_es_maximo_confirmado PASSED [ 88%]
+pruebas/test_v15_10_1_r15_tmax_causal.py::test_senal_insuficiente_es_sin_maximo_defendible PASSED [ 92%]
+pruebas/test_v15_10_1_r15_tmax_causal.py::test_meseta_confirmada_sigue_publicando_maximo_estimado PASSED [ 96%]
+pruebas/test_v15_10_1_r15_tmax_causal.py::test_caida_clara_tras_pico_es_maximo_estimado PASSED [100%]
+
+============================== 26 passed in 1.03s ==============================
+
+--- Node: todos los .cjs (36) ---
+OK: 36 · FALLOS: ninguno
+$ node pruebas/test_v15_10_1_r15_2_ui_maximo_no_confirmado.cjs
+OK R15.1 Fase 2 UI: máximo NO CONFIRMADO explícito
+$ node pruebas/test_v15_10_1_r15_3_carrera_ui.cjs
+OK R15.1 Fase 3: carrera de pantalla cerrada (guarda compartida + fuente única)
+
+--- Suite Python completa ---
+$ PYTHONPATH=. python -m pytest pruebas/ -q
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+880 passed, 1 warning in 99.41s (0:01:39)

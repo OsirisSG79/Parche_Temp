@@ -1,0 +1,9 @@
+=== GREEN R15.5 F5+F6 — soak warm-up (LOW-06) + identidad 15.10.1-r15.5 ===
+Fecha: 2026-10-16 15:53 UTC · commit: 9a50dc7
+
+28 passed in 10.48s
+
+VERSION.txt: 15.10.1-r15.5
+PATCH_BUILD: PATCH_BUILD = "15.10.1-r15.5"
+cache-busting index: 5 assets
+.cjs activos: 38

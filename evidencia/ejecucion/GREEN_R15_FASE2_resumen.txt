@@ -1,0 +1,35 @@
+FASE 2 R15 — VERDE (ALTA-03 + ALTA-07 + MEDIA-14; pruebas obligatorias 5, 6, 7, 8 y 18)
+Árbol: /home/user/r15-repo rama codex/ocr-v15-10-1-r15
+
+Cambios en dashboard/backend/app.py:
+  1. Infraestructura central de mutación del documento de resultados:
+     _datos_mutacion_lock (serializa leer→modificar→persistir),
+     _leer_documento_disco() (fresco, sin caché), _commit_documento()
+     (incrementa revision_documento; escritura verificada lanzar=True),
+     _verificar_expected_revision() (CAS ⇒ 409 "recarga antes de guardar"),
+     _guard_mutacion_video() (409 si pipeline activo/reservado o reanálisis),
+     _verificar_revision_no_completada() (409 "Reabre la revisión…"; degrada
+     inicial a por_revisar si la fila está incompleta —la BD del gestor es la
+     fuente autoritativa—), _localizar_fila_video().
+  2. /api/video/revision, zona-aprendizaje, zona-revertir: guard + CAS +
+     pre-chequeo de revisión completada ANTES de efectos persistentes; el
+     commit relee el documento MÁS RECIENTE bajo lock y revalida (merge, no
+     snapshot). zona-revertir conserva su rollback transaccional C3/C4 y lo
+     extiende a rechazos HTTPException (nada queda a medias).
+  3. _reanalizar_videos_fondo (ALTA-03): ya NO reescribe el documento completo
+     desde su deepcopy; registra patches por video y al final los fusiona bajo
+     lock sobre el documento fresco (revision_manual/ultima_zona_nacimiento y
+     cualquier edición concurrente sobreviven). Patch cuyo caso/video ya no
+     existe ⇒ error visible, nunca descarte silencioso.
+  4. /api/video/maximo: CAS expected_revision dentro de su lock existente.
+  5. Modelos: expected_revision opcional en SolicitudRevisionVideo,
+     SolicitudZonaVideo, SolicitudZonaRevertir, SolicitudMaximoVideo.
+     Respuestas exponen revision_documento (detalle incluido).
+
+Tests nuevos: pruebas/test_v15_10_1_r15_revisiones.py (7) — RED antes del fix:
+7/7 fallaban (RED_R15_FASE2_sobre_fase1.txt). Verdes tras el fix.
+Suite completa: 810 passed / 13 failed / 1 skipped (los 13 = obsoletos V15.9
+conocidos de la Fase 0; cero regresiones). Contratos C3/C4 de V15.9.2
+(test_v15_9_2_correcciones_c1_c7.py, 22 tests) siguen verdes sin editar.
+.......                                                                  [100%]
+7 passed in 0.94s
