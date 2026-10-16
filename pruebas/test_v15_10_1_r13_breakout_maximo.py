@@ -88,6 +88,9 @@ def test_un_video_defendible_pinta_sin_confirmacion_humana():
             "resolucion_nativa_ms": 0.2,
             "fuente_tiempo_color": "overlay_rec",
             "secuencia_despliegue_r13": {
+                # R15.1 (MEDIO-09): la mediana confirmada del caso exige el
+                # estado explícito de la secuencia; fixture actualizada.
+                "estado": "maximo_inflado_estimado",
                 "frame_breakout": 29, "frame_max_inflado": 70,
                 "tiempo_max_inflado_ms": 14.0, "duracion_expansion_ms": 8.2,
                 "confianza_maximo": 0.9, "anomalías": [],
@@ -202,6 +205,7 @@ def test_excel_apertura_expone_maximo_automatico_sin_mover_columnas_legacy(tmp_p
         "videos": [{
             "id": "cam1", "ruta": "cam1.avi",
             "secuencia_despliegue_r13": {
+                "estado": "maximo_inflado_estimado",  # R15.1 (MEDIO-09)
                 "frame_breakout": 29, "frame_max_inflado": 70,
                 "tiempo_breakout_ms": 5.8, "tiempo_max_inflado_ms": 14.0,
                 "duracion_expansion_ms": 8.2, "confianza_maximo": "alta",
